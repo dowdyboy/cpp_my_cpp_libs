@@ -1,0 +1,31 @@
+# 复制成 vm-env.sh 并填上真实值（vm-env.sh 已在 .gitignore 里，不会进仓库）
+#
+#   cp scripts/vm-env.sh.example scripts/vm-env.sh
+#
+# 说明：这里的路径都是"虚拟机上的绝对路径"，不要写 $HOME ——
+#       这个文件是在本机（WSL）里 source 的，$HOME 会变成本机的 home。
+
+# ---- VMware 虚拟机（装 PetaLinux 2020.2 SDK 的那台）----
+export VM_HOST="192.168.159.135"
+export VM_USER="lfbhlx"
+export VM_PASS="在这里填密码"
+
+# ---- 虚拟机上的目录布局 ----
+#   /home/<user>/Projects/cpp_my_cpp_libs/
+#     ├── src/    项目源码（从本机同步过去）
+#     ├── deps/   第三方源码（onnxruntime-1.18, eigen-3.4.0）
+#     └── dist/   编好的产物（onnxruntime-armv7-petalinux2020）
+export VM_PROJ="/home/lfbhlx/Projects/cpp_my_cpp_libs"
+
+# ---- 虚拟机上的工具（已合并到原有的 ~/Tools 里）----
+export VM_CMAKE="/home/lfbhlx/Tools/cmake/bin/cmake"
+export VM_NINJA="/home/lfbhlx/Tools/ninja"
+export VM_PYTHON="/home/lfbhlx/Tools/miniconda3/bin/python"
+
+# ---- SDK ----
+export VM_SDK="/home/lfbhlx/Projects/adda_fft/linux/sdk"
+
+# ---- 板子 ----
+export BOARD_HOST="192.168.0.130"
+export BOARD_USER="root"
+export BOARD_PASS="root"

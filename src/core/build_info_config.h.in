@@ -1,0 +1,13 @@
+#pragma once
+// =============================================================================
+//  由 CMake configure_file 生成，不要手工编辑
+//
+//  这里用生成头而不是 -D 宏字符串，是因为 Windows 上不同生成器/编译器
+//  对命令行里转义引号的处理不一致（会给 gcc 传成 0.1.0 而不是 "0.1.0"）。
+// =============================================================================
+
+#define MYLIB_VERSION_STR "@PROJECT_VERSION@"
+#define MYLIB_BUILD_TYPE_STR "@MYLIB_BUILD_TYPE_STR@"
+#define MYLIB_COMPILER_STR "@CMAKE_CXX_COMPILER_ID@ @CMAKE_CXX_COMPILER_VERSION@"
+#define MYLIB_TARGET_TRIPLE_STR "@MYLIB_TARGET_TRIPLE@"
+#define MYLIB_CROSS_COMPILED @MYLIB_CROSS_COMPILED_INT@

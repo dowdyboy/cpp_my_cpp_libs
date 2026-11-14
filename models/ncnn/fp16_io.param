@@ -1,0 +1,5 @@
+7767517
+3 3
+Input            x                        0 1 x
+MemoryData       one                      0 1 one 0=1
+BinaryOp         add                      2 1 x one y 0=0

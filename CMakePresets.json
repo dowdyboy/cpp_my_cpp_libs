@@ -1,0 +1,102 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "MYLIB_BUILD_EXAMPLES": "ON",
+        "MYLIB_BUILD_TESTS": "ON"
+      }
+    },
+
+    {
+      "name": "win-msvc",
+      "displayName": "Windows x64 / MSVC (VS 2026)",
+      "description": "宿主原生构建；唯一支持 ONNX Runtime 预编译包的方式",
+      "inherits": "base",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "cacheVariables": {
+        "MYLIB_ENABLE_NCNN": "ON",
+        "MYLIB_ENABLE_CV": "ON"
+      }
+    },
+    {
+      "name": "win-mingw",
+      "displayName": "Windows x64 / MinGW-w64 (UCRT64, Ninja)",
+      "description": "GCC 15.2 + Ninja，编译速度快，产物不依赖 MSVC 运行库",
+      "inherits": "base",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/win-mingw",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "D:/ProgramFiles/msys64/ucrt64/bin/g++.exe",
+        "CMAKE_MAKE_PROGRAM": "D:/ProgramFiles/ninja-win/ninja.exe"
+      },
+      "environment": {
+        "PATH": "D:/ProgramFiles/msys64/ucrt64/bin;$penv{PATH}"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+
+    {
+      "name": "linux-x64",
+      "displayName": "Linux x86_64 (交叉编译, gcc 9.3 / glibc 2.31)",
+      "inherits": "base",
+      "generator": "Ninja",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/linux-x64-gcc9.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_MAKE_PROGRAM": "D:/ProgramFiles/ninja-win/ninja.exe"
+      }
+    },
+    {
+      "name": "linux-armv7",
+      "displayName": "Linux armv7-A 硬浮点 (Zynq-7000 / Cortex-A9)",
+      "inherits": "base",
+      "generator": "Ninja",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/linux-armv7-zynq.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_MAKE_PROGRAM": "D:/ProgramFiles/ninja-win/ninja.exe"
+      }
+    },
+    {
+      "name": "linux-aarch64",
+      "displayName": "Linux aarch64 (ZynqMP / 通用 ARM64)",
+      "inherits": "base",
+      "generator": "Ninja",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/linux-aarch64.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_MAKE_PROGRAM": "D:/ProgramFiles/ninja-win/ninja.exe"
+      }
+    }
+  ],
+
+  "buildPresets": [
+    { "name": "win-msvc",     "configurePreset": "win-msvc", "configuration": "Release" },
+    { "name": "win-mingw",    "configurePreset": "win-mingw" },
+    { "name": "linux-x64",    "configurePreset": "linux-x64" },
+    { "name": "linux-armv7",  "configurePreset": "linux-armv7" },
+    { "name": "linux-aarch64","configurePreset": "linux-aarch64" }
+  ],
+
+  "testPresets": [
+    {
+      "name": "win-msvc",
+      "configurePreset": "win-msvc",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "win-mingw",
+      "configurePreset": "win-mingw",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}
