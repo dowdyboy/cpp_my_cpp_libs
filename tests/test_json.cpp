@@ -8,6 +8,8 @@
 using my::json::Document;
 using my::json::Type;
 
+MYTEST_SUITE("json");
+
 MYTEST_CASE(json_parse_and_type) {
     auto r = Document::parse(R"({"a":1,"b":"x","c":[1,2],"d":null,"e":true,"f":1.5})");
     CHECK(r.ok());
@@ -39,9 +41,12 @@ MYTEST_CASE(json_path_get) {
     CHECK(r.ok());
     const auto& d = r.value();
 
-    CHECK_EQ(d.get<int>("a.b.c").value(), 42);
-    CHECK_EQ(d.get<int>("arr[0]").value(), 10);
-    CHECK_EQ(d.get<int>("arr[2]").value(), 30);
+    CHECK_OK_VALUE(v44, d.get<int>("a.b.c"));
+    CHECK_EQ(v44, 42);
+    CHECK_OK_VALUE(a44, d.get<int>("arr[0]"));
+    CHECK_EQ(a44, 10);
+    CHECK_OK_VALUE(a46, d.get<int>("arr[2]"));
+    CHECK_EQ(a46, 30);
 
     // 越界 / 不存在 / 类型错误
     CHECK_EQ(d.get<int>("arr[5]").status().code(), my::Errc::NotFound);
@@ -63,18 +68,24 @@ MYTEST_CASE(json_path_set) {
     CHECK_OK(d.set("num", 3.5));
     CHECK_OK(d.set("flag", true));
 
-    CHECK_EQ(d.get<int>("a.b.c").value(), 1);
-    CHECK_EQ(d.get<std::string>("arr[0]").value(), std::string("x"));
-    CHECK_EQ(d.get<std::string>("arr[2]").value(), std::string("z"));
-    CHECK_NEAR(d.get<double>("num").value(), 3.5, 1e-9);
-    CHECK(d.get<bool>("flag").value());
+    CHECK_OK_VALUE(c68, d.get<int>("a.b.c"));
+    CHECK_EQ(c68, 1);
+    CHECK_OK_VALUE(s69, d.get<std::string>("arr[0]"));
+    CHECK_EQ(s69, std::string("x"));
+    CHECK_OK_VALUE(s70, d.get<std::string>("arr[2]"));
+    CHECK_EQ(s70, std::string("z"));
+    CHECK_OK_VALUE(n71, d.get<double>("num"));
+    CHECK_NEAR(n71, 3.5, 1e-9);
+    CHECK_OK_VALUE(b72, d.get<bool>("flag"));
+    CHECK(b72);
 
     // 数组中间补 null
     CHECK_EQ(d.size("arr"), std::size_t{3});
 
     // 覆盖已有值
     CHECK_OK(d.set("a.b.c", 99));
-    CHECK_EQ(d.get<int>("a.b.c").value(), 99);
+    CHECK_OK_VALUE(v79, d.get<int>("a.b.c"));
+    CHECK_EQ(v79, 99);
 }
 
 MYTEST_CASE(json_get_or) {
@@ -110,8 +121,10 @@ MYTEST_CASE(json_dump_roundtrip) {
     const std::string text = r.value().dump();
     auto again = Document::parse(text);
     CHECK(again.ok());
-    CHECK_EQ(again.value().get<int>("n").value(), 1);
-    CHECK_EQ(again.value().get<std::string>("s").value(), std::string("中文"));
+    CHECK_OK_VALUE(n115, again.value().get<int>("n"));
+    CHECK_EQ(n115, 1);
+    CHECK_OK_VALUE(s116, again.value().get<std::string>("s"));
+    CHECK_EQ(s116, std::string("中文"));
 }
 
 MYTEST_CASE(json_file_roundtrip) {
@@ -124,7 +137,8 @@ MYTEST_CASE(json_file_roundtrip) {
 
     auto loaded = Document::parse_file("output/test_json.json");
     CHECK(loaded.ok());
-    CHECK_EQ(loaded.value().get<int>("hello.world").value(), 1);
+    CHECK_OK_VALUE(v129, loaded.value().get<int>("hello.world"));
+    CHECK_EQ(v129, 1);
 
     auto missing = Document::parse_file("output/definitely_not_here.json");
     CHECK(!missing.ok());

@@ -32,6 +32,8 @@ spdlog::level::level_enum to_spdlog(Level level) noexcept {
 struct State {
     std::mutex                       mutex;
     std::shared_ptr<spdlog::logger>  logger;
+    /// 异步模式下本库自有的线程池（不复用 spdlog 的全局池，避免和宿主互相覆盖）
+    std::shared_ptr<spdlog::details::thread_pool> pool;
     std::atomic<int>                 level{static_cast<int>(Level::Info)};
     Sink                             sink;
     bool                             initialized = false;
@@ -65,10 +67,8 @@ const char* level_name(Level level) noexcept {
 }
 
 Status init(const Config& config) {
-    State& st = state();
-    shutdown();
-
     try {
+        // ---- 先在局部把新 logger 完整搭好；任何一步失败都不动现有配置 ----
         std::vector<spdlog::sink_ptr> sinks;
 
         if (config.to_console) {
@@ -99,14 +99,15 @@ Status init(const Config& config) {
             sink->set_level(to_spdlog(config.level));
         }
 
-        std::shared_ptr<spdlog::logger> logger;
+        std::shared_ptr<spdlog::details::thread_pool> pool;
+        std::shared_ptr<spdlog::logger>              logger;
         if (config.async) {
-            spdlog::init_thread_pool(config.async_queue_size, 1);
+            // 自建线程池：不走 spdlog::init_thread_pool，避免覆盖宿主的全局池
+            pool = std::make_shared<spdlog::details::thread_pool>(config.async_queue_size, 1);
             auto policy = config.async_block_on_full ? spdlog::async_overflow_policy::block
                                                      : spdlog::async_overflow_policy::overrun_oldest;
             logger = std::make_shared<spdlog::async_logger>(config.logger_name, sinks.begin(),
-                                                            sinks.end(), spdlog::thread_pool(),
-                                                            policy);
+                                                            sinks.end(), pool, policy);
         } else {
             logger = std::make_shared<spdlog::logger>(config.logger_name, sinks.begin(), sinks.end());
         }
@@ -114,12 +115,29 @@ Status init(const Config& config) {
         logger->set_level(to_spdlog(config.level));
         logger->flush_on(spdlog::level::warn);
 
+        // ---- 替换现有配置：旧对象必须在锁外销毁（异步池析构会 join 线程）----
+        State& st = state();
+        std::shared_ptr<spdlog::details::thread_pool> old_pool;
+        std::shared_ptr<spdlog::logger>              old_logger;  // 先于 pool 销毁
         {
             std::lock_guard<std::mutex> lock(st.mutex);
+            old_logger     = std::move(st.logger);
+            old_pool       = std::move(st.pool);
             st.logger      = std::move(logger);
+            st.pool        = std::move(pool);
             st.initialized = true;
         }
         st.level.store(static_cast<int>(config.level));
+
+        if (old_logger) {
+            try {
+                old_logger->flush();
+            } catch (...) {
+                // 旧 logger 的刷新失败不影响新配置生效
+            }
+            old_logger.reset();
+        }
+        old_pool.reset();
 
         return Ok();
     } catch (const std::exception& e) {
@@ -131,11 +149,13 @@ Status init(const Config& config) {
 
 void shutdown() {
     State& st = state();
-    std::shared_ptr<spdlog::logger> logger;
+    std::shared_ptr<spdlog::details::thread_pool> pool;
+    std::shared_ptr<spdlog::logger>              logger;
     {
         std::lock_guard<std::mutex> lock(st.mutex);
-        if (!st.initialized && !st.logger) return;
-        logger        = std::move(st.logger);
+        if (!st.initialized && !st.logger && !st.pool) return;
+        logger         = std::move(st.logger);
+        pool           = std::move(st.pool);
         st.initialized = false;
     }
     try {
@@ -143,10 +163,13 @@ void shutdown() {
             logger->flush();
             logger.reset();
         }
-        spdlog::shutdown();
     } catch (...) {
         // 关闭路径不允许抛出
     }
+    // 只回收本库自己创建的线程池。
+    // 这里**不能**调 spdlog::shutdown()：那是进程级操作，会把宿主自己
+    // register_logger() 过的 logger 和全局线程池一起清掉。
+    pool.reset();
 }
 
 bool is_initialized() noexcept {

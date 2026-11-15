@@ -50,6 +50,7 @@ struct Config {
     std::size_t rotate_files = 3;
 
     /// 异步日志（适合高吞吐；退出前必须 shutdown() 或 flush()）
+    /// 线程池由本库自己持有，不覆盖宿主的 spdlog 全局线程池。
     bool        async = false;
     std::size_t async_queue_size = 8192;
     /// 异步线程策略：block=队列满时阻塞，overrun_oldest=丢弃最旧
@@ -62,10 +63,14 @@ struct Config {
 // -----------------------------------------------------------------------------
 //  生命周期
 // -----------------------------------------------------------------------------
-/// 初始化。重复调用会先 shutdown 再重建。
+/// 初始化。可重复调用：新配置构建成功后才原子替换旧配置；
+/// 构建失败（如参数非法）时返回错误，**原有配置保持可用**。
+///
+/// 本库只管理自己创建的 logger 与线程池，不会调用 spdlog::shutdown()，
+/// 因此可以和宿主自己的 spdlog logger 共存。
 MYLIB_API Status init(const Config& config);
 
-/// 注销并释放全局 logger
+/// 释放本库持有的 logger 与异步线程池；不影响宿主自己 register 的 spdlog logger。
 MYLIB_API void shutdown();
 
 MYLIB_API bool is_initialized() noexcept;

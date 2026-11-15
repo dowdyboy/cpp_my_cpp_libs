@@ -8,6 +8,7 @@
 //  三方库（nlohmann / ORT）的异常在本库边界处被翻译成 Status。
 // =============================================================================
 
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <string>
@@ -157,12 +158,22 @@ private:
 
     T* checked() noexcept {
         T* p = std::get_if<0>(&storage_);
-        if (p == nullptr) std::abort();  // 违反 ok() 前置条件
+        if (p == nullptr) {
+            // 违反前置条件就是编程错误，该炸；但炸之前留一行线索，
+            // 否则嵌入式上表现成"莫名重启"，什么也查不到。
+            std::fprintf(stderr, "[my_cpp_libs] Result<T>::value() 在失败状态被调用: %s\n",
+                         std::get<1>(storage_).to_string().c_str());
+            std::abort();
+        }
         return p;
     }
     const T* checked() const noexcept {
         const T* p = std::get_if<0>(&storage_);
-        if (p == nullptr) std::abort();
+        if (p == nullptr) {
+            std::fprintf(stderr, "[my_cpp_libs] Result<T>::value() 在失败状态被调用: %s\n",
+                         std::get<1>(storage_).to_string().c_str());
+            std::abort();
+        }
         return p;
     }
 

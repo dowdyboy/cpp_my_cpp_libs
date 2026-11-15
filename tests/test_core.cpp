@@ -4,10 +4,15 @@
 #include <my_cpp_libs/core/half.hpp>
 #include <my_cpp_libs/core/status.hpp>
 
+#include <cmath>
+#include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
+
+MYTEST_SUITE("core");
 
 MYTEST_CASE(status_basic) {
     my::Status ok;
@@ -119,4 +124,72 @@ MYTEST_CASE(half_negative_and_rounding) {
     CHECK_NEAR(my::half_to_float(my::float_to_half(-0.333f)), -0.333, 0.001);
     // 65504 是 fp16 最大有限值
     CHECK_NEAR(my::half_to_float(my::float_to_half(65504.0f)), 65504.0, 1.0);
+}
+
+// 位精确校验：这些值以前要么踩到移位未定义行为，要么舍入方向错 1 ULP
+MYTEST_CASE(half_bit_exact) {
+    constexpr std::uint16_t kZero      = 0x0000u;
+    constexpr std::uint16_t kMinSub    = 0x0001u;  // 2^-24 = 5.96e-8
+    constexpr std::uint16_t kNegZero   = 0x8000u;
+    constexpr std::uint16_t kOne       = 0x3C00u;
+    constexpr std::uint16_t kOneUp     = 0x3C01u;
+    constexpr std::uint16_t kMaxFinite = 0x7BFFu;  // 65504
+    constexpr std::uint16_t kInf       = 0x7C00u;
+
+    // 符号与零
+    CHECK_EQ(my::float_to_half(0.0f), kZero);
+    CHECK_EQ(my::float_to_half(-0.0f), kNegZero);
+
+    // 次正规边界：0x33000000 恰好是 2^-25，是 0 与 2^-24 的中点 -> 向偶数舍入到 0
+    const float half_ulp = std::ldexp(1.0f, -25);
+    CHECK_EQ(my::float_to_half(half_ulp), kZero);
+    CHECK_EQ(my::float_to_half(std::nextafter(half_ulp, 1.0f)), kMinSub);
+    CHECK_EQ(my::float_to_half(std::ldexp(1.0f, -24)), kMinSub);
+
+    // 最大的次正规数（0x03FF）与最小的正规数（0x0400）之间不能跳错
+    CHECK_EQ(my::float_to_half(1023.0f * std::ldexp(1.0f, -24)), static_cast<std::uint16_t>(0x03FF));
+    CHECK_EQ(my::float_to_half(std::ldexp(1.0f, -14)), static_cast<std::uint16_t>(0x0400));
+
+    // 次正规区向上舍入会进位到最小正规数 2^-14：
+    // 掩码写成 & 0x3FF 会把 k=1024 变成 0（这条曾经真的错过）
+    const float mid_sub_to_norm = 1023.5f * std::ldexp(1.0f, -24);  // 恰好是中点
+    CHECK_EQ(my::float_to_half(mid_sub_to_norm), static_cast<std::uint16_t>(0x0400));
+    CHECK_EQ(my::float_to_half(std::ldexp(1.0f, -14) * (1.0f - 1.0f / 4096.0f)),
+             static_cast<std::uint16_t>(0x0400));
+    CHECK_EQ(my::float_to_half(std::nextafter(mid_sub_to_norm, 0.0f)),
+             static_cast<std::uint16_t>(0x03FF));
+
+    // 原来的未定义行为区间：|v| 远小于 2^-25 时必须安静地给出 0，而不是垃圾值
+    CHECK_EQ(my::float_to_half(7.3e-12f), kZero);
+    CHECK_EQ(my::float_to_half(-7.3e-12f), kNegZero);
+    CHECK_EQ(my::float_to_half(std::numeric_limits<float>::denorm_min()), kZero);
+
+    // 舍入必须"向偶数"：1.0 与 1.0009765625 的中点回到 1.0（偶数尾数）
+    const float tie = 1.0f + std::ldexp(1.0f, -11);
+    CHECK_EQ(my::float_to_half(tie), kOne);
+    CHECK_EQ(my::float_to_half(std::nextafter(tie, 2.0f)), kOneUp);
+    // 2.0 的相邻值跨度是 2^-10，中点同样向偶数舍入
+    const float tie2 = 2.0f + std::ldexp(1.0f, -10);
+    CHECK_EQ(my::float_to_half(tie2), static_cast<std::uint16_t>(0x4000));
+
+    // 上溢边界：65504 保留，65520（= 65504 + 16）是到 inf 的中点 -> 向偶数舍入成 inf
+    CHECK_EQ(my::float_to_half(65504.0f), kMaxFinite);
+    CHECK_EQ(my::float_to_half(65519.0f), kMaxFinite);
+    CHECK_EQ(my::float_to_half(65520.0f), kInf);
+    CHECK_EQ(my::float_to_half(-70000.0f), static_cast<std::uint16_t>(0xFC00));
+
+    // NaN 必须还是 NaN（指数全 1 且尾数非 0）
+    const std::uint16_t nan_bits = my::float_to_half(std::numeric_limits<float>::quiet_NaN());
+    CHECK_EQ(static_cast<std::uint16_t>(nan_bits & 0x7C00u), kInf);
+    CHECK((nan_bits & 0x03FFu) != 0u);
+    CHECK(std::isnan(my::half_to_float(nan_bits)));
+
+    // 次正规数往返：0x0001 / 0x03FF 必须原样回来
+    CHECK_EQ(my::float_to_half(my::half_to_float(0x0001u)), static_cast<std::uint16_t>(0x0001u));
+    CHECK_EQ(my::float_to_half(my::half_to_float(0x03FFu)), static_cast<std::uint16_t>(0x03FFu));
+    // 中位数附近的往返也不能跳两格
+    for (std::uint32_t bits = 0x0000u; bits <= 0x7BFFu; ++bits) {
+        const std::uint16_t back = my::float_to_half(my::half_to_float(static_cast<std::uint16_t>(bits)));
+        CHECK_EQ(back, static_cast<std::uint16_t>(bits));
+    }
 }

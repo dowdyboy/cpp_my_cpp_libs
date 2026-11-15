@@ -31,6 +31,10 @@ set(MYLIB_OPENCV_ROOT "" CACHE PATH "OpenCV 安装根目录（含 OpenCVConfig.c
 # 构建共享库而不是静态库（嵌入式默认静态）
 option(MYLIB_BUILD_SHARED "构建动态库" OFF)
 
+# 消毒器：空 / address（内存错误）/ undefined（未定义行为，trap 模式）
+set(MYLIB_SANITIZE "" CACHE STRING "消毒器：留空 / address / undefined")
+set_property(CACHE MYLIB_SANITIZE PROPERTY STRINGS "" address undefined)
+
 # 三方依赖目录（默认在源码树 third_party，由 resources/*.zip 自动解压）
 set(MYLIB_DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party" CACHE PATH "已解压的三方库根目录")
 set(MYLIB_RESOURCES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources" CACHE PATH "三方库压缩包目录")

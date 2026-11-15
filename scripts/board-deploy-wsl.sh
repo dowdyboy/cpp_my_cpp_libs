@@ -28,11 +28,11 @@ SCP="sshpass -p $PASS scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev
 die() { echo "!! $*" >&2; exit 1; }
 
 [ -x "$BIN/mylib_tests" ] || die "找不到静态产物，先构建：
-  cmake -S . -B build/linux-armv7-static -G Ninja \\
-    -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/linux-armv7-zynq.cmake \\
-    -DCMAKE_BUILD_TYPE=Release -DMYLIB_ENABLE_ONNXRUNTIME=OFF -DMYLIB_ENABLE_NCNN=ON \\
-    -DMYLIB_BUILD_EXAMPLES=OFF -DCMAKE_EXE_LINKER_FLAGS=-static
-  cmake --build build/linux-armv7-static"
+  cmake --preset linux-armv7-static
+  cmake --build --preset linux-armv7-static
+  # 等价于：-DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/linux-armv7-zynq.cmake
+  #         -DMYLIB_ENABLE_ONNXRUNTIME=OFF -DMYLIB_ENABLE_NCNN=ON
+  #         -DMYLIB_BUILD_EXAMPLES=OFF -DCMAKE_EXE_LINKER_FLAGS=-static"
 
 command -v sshpass >/dev/null || die "缺少 sshpass：apt-get install sshpass"
 

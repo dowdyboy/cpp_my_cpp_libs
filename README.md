@@ -19,22 +19,34 @@
 ## 快速开始
 
 ```powershell
+# 0) 首次 clone 后补一次三方库压缩包（它们不进 git；离线环境手工放进 resources/ 也行）
+.\scripts\fetch-deps.ps1          # Linux/WSL: bash scripts/fetch-deps.sh
+
 # Windows / MinGW（最快）
 cmake --preset win-mingw
 cmake --build --preset win-mingw
-ctest --preset win-mingw
+ctest --preset win-mingw          # 按套件注册，能看出是哪一块挂了
 
 # Windows / MSVC（唯一能用 ONNX Runtime 预编译包的方式）
 cmake --preset win-msvc
 cmake --build --preset win-msvc
 ctest --preset win-msvc
 
-# 交叉编译到 Zynq-7000（armv7-A 硬浮点）
-cmake --preset linux-armv7
-cmake --build --preset linux-armv7
+# Windows / MinGW + UBSan（未定义行为检测，trap 模式，不需要 libubsan）
+cmake --preset win-ubsan
+cmake --build --preset win-ubsan
+ctest --preset win-ubsan
 
-# 五个平台一把梭
+# 交叉编译到 armv7：三个预设各有明确用途，别混
+cmake --preset linux-armv7          # 2024 SDK(glibc 2.39)：只做编译/链接验证
+cmake --preset linux-armv7-static   # 全静态：板子 glibc 太旧时的逃生路线，可上板
+cmake --preset linux-armv7-sdk2020  # 板子配套 SDK(glibc 2.30)：上板正解，需在 Linux 上配
+
+# 六个预设一把梭（宿主平台会顺带跑 ctest）
 .\scripts\build-all.ps1
+
+# 本机跑一遍 CI 等价检查（默认 / UBSan / 最小配置）
+.\scripts\ci-local.ps1
 
 # 可选组件：ncnn 备选后端 / OpenCV 图像组件（win-msvc 预设默认已开）
 cmake --preset win-msvc -DMYLIB_ENABLE_NCNN=ON -DMYLIB_ENABLE_CV=ON
@@ -109,7 +121,7 @@ include/my_cpp_libs/    对外公共头
 src/                    组件实现
 examples/               封装层示例 + 原生 API 示例 + 独立消费方工程
 tools/                  命令行工具（model_inspect）+ 模型生成脚本
-tests/                  无依赖的单元测试（69 个用例；MinGW 无 OpenCV 时 63 个）
+tests/                  无依赖的单元测试（79 个用例；MinGW 无 OpenCV 时 73 个）
 models/                 测试模型（脚本生成，含 7 种形态）
 scripts/                构建脚本、ONNX Runtime 交叉编译脚本
 third_party/            由 resources/*.zip 自动解压（不入库）
@@ -127,19 +139,30 @@ docs/                   规划、API、构建、推理、OpenCV
 
 ## 三方库来源
 
-`resources/` 里的压缩包是唯一真源，首次 `cmake` 时自动解压到 `third_party/`，完全离线可复现：
+`resources/` 里的压缩包是**构建期唯一真源**：首次 `cmake` 会自动解压到 `third_party/`，
+之后完全离线可复现。但这些 zip 体积大、不进 git，所以 clone 之后要先补一次：
+
+```powershell
+.\scripts\fetch-deps.ps1     # 或 bash scripts/fetch-deps.sh
+```
+
+必需（缺了直接 FATAL_ERROR）：
 
 | 包 | 版本 | 形态 |
 |---|---|---|
 | eigen-5.0.0.zip | 5.0.0 | 纯头文件 |
 | json-include.zip | nlohmann/json 3.12.0 | 纯头文件 |
 | spdlog-1.17.0.zip | 1.17.0 | 源码 + CMake |
-| onnxruntime-win-x64-1.23.2.zip | 1.23.2 | Windows x64 预编译（MSVC ABI） |
-| onnxruntime-linux-armv7-1.23.2 | 1.23.2 | **本机交叉编译**（WSL + armhf 工具链），见 `scripts/build-ort-armv7-wsl.sh` |
 
-另外两个由脚本落到 `third_party/` 的依赖（不进 git）：
+按平台自备（**不在** resources/ 里，缺了自动降级，不会阻断构建）：
 
-| 目录 | 说明 |
-|---|---|
-| `ncnn-20250503` / `ncnn-linux-armv7-20250503` | ncnn 备选后端，MSVC 与 armv7 各编一份 |
-| `opencv-4.12.0` | OpenCV 官方 Windows 包（仅 MSVC 可用） |
+| 目录 | 说明 | 缺了会怎样 |
+|---|---|---|
+| `onnxruntime-win-x64-1.23.2/` | Windows x64 预编译（MSVC ABI） | infer 回退 stub 后端 |
+| `onnxruntime-armv7-petalinux2020/` | 板端 ORT 1.18.1（GCC 9.2 能编的最后一版） | armv7 回退 stub |
+| `onnxruntime-linux-armv7-1.23.2/` | WSL + armhf 交叉编译，见 `scripts/build-ort-armv7-wsl.sh` | — |
+| `ncnn-20250503/` / `ncnn-linux-armv7-20250503/` | ncnn 备选后端 | 只有 ORT，转不了 ncnn 的模型就没辙 |
+| `opencv-4.12.0/` | OpenCV 官方 Windows 包（仅 MSVC 可用） | `cv` 组件消失 |
+
+> armv7 上 `third_party` 里同时放着 1.18.1 和 1.23.2 两份 ORT 时会**优先选 1.18.1**
+> （目录名排序 + 架构校验），这正是板子需要的版本。configure 摘要里会打印最终选中的包名。

@@ -74,6 +74,10 @@ function(mylib_add_component name)
 
     target_link_libraries(mylib_${name} PUBLIC mylib_platform ${ARG_LINK})
     target_link_libraries(mylib_${name} PRIVATE mylib_warnings)
+    if(TARGET mylib_sanitize)
+        # PUBLIC：消毒器的链接选项必须出现在最终可执行文件的链接行上
+        target_link_libraries(mylib_${name} PUBLIC mylib_sanitize)
+    endif()
     if(ARG_BUILD_DEPS)
         add_dependencies(mylib_${name} ${ARG_BUILD_DEPS})
     endif()
@@ -91,17 +95,20 @@ function(mylib_add_component name)
 endfunction()
 
 # ---------------------------------------------------------------- 运行时 DLL
-# Windows 上把依赖的 DLL 拷到可执行文件旁边，省得手动配 PATH。
-# 目前处理 ONNX Runtime 和 OpenCV 两个会带 DLL 的依赖。
+# Windows 上把**这个 target 真正需要的**运行时 DLL 拷到它旁边，省得手动配 PATH。
+# 只处理 ONNX Runtime 和 OpenCV 两个会带 DLL 的依赖；调用方应先判断
+# target 是否真的链接了 mylib_infer / mylib_cv，否则会把无谓的复制挂到每个 target 上。
 function(mylib_copy_runtime_dlls target)
     if(NOT WIN32)
         return()
     endif()
 
     set(_dlls "")
-    if(DEFINED MYLIB_ONNXRUNTIME_ROOT AND MYLIB_ONNXRUNTIME_ROOT)
-        if(EXISTS "${MYLIB_ONNXRUNTIME_ROOT}/lib/onnxruntime.dll")
-            list(APPEND _dlls "${MYLIB_ONNXRUNTIME_ROOT}/lib/onnxruntime.dll")
+    # 优先用自动探测到的 ORT 根目录（MYLIB_ONNXRUNTIME_ROOT 是"用户显式指定"的入口，
+    # 自动探测结果不再回写它，见 cmake/Deps.cmake）
+    if(DEFINED MYLIB_ORT_ROOT_DETECTED AND MYLIB_ORT_ROOT_DETECTED)
+        if(EXISTS "${MYLIB_ORT_ROOT_DETECTED}/lib/onnxruntime.dll")
+            list(APPEND _dlls "${MYLIB_ORT_ROOT_DETECTED}/lib/onnxruntime.dll")
         endif()
     endif()
     if(DEFINED MYLIB_OPENCV_RUNTIME_DLLS)

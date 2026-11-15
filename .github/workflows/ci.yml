@@ -1,0 +1,219 @@
+name: CI
+
+# 目标：把 README 里"五个平台都编过了、79 个用例全绿"这类结论变成每次提交都自动验证的事实。
+#
+# 设计取舍：
+#   * 不用 CMakePresets —— 预设里的工具链路径是本机绝对路径，CI 上不存在。
+#     CI 直接给 -D 参数，这也顺便验证了"不依赖预设也能构建"。
+#   * resources/*.zip 不进 git，所以每个 job 先跑 scripts/fetch-deps.sh。
+#     ONNX Runtime / OpenCV / ncnn 的预编译包体积大且按平台区分，CI 一律不装，
+#     infer 组件自动退化成 stub 后端（这正是它有 stub 的用途）。
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 依赖下载很慢，统一由 job 自己的 steps 处理；这里只放公共开关
+  CMAKE_BUILD_PARALLEL_LEVEL: 4
+
+jobs:
+  # ---------------------------------------------------------------- Linux 默认组合
+  linux:
+    name: Linux / gcc / 全组件
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装工具
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: 缓存三方库
+        uses: actions/cache@v4
+        with:
+          path: |
+            resources
+            third_party
+          key: deps-linux-v1
+      - name: 补齐依赖压缩包
+        run: bash scripts/fetch-deps.sh
+      - name: Configure
+        run: cmake -S . -B build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build/ci
+      - name: Test
+        run: ctest --test-dir build/ci --output-on-failure
+
+  # ---------------------------------------------------------------- UBSan
+  linux-ubsan:
+    name: Linux / gcc / UBSan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - uses: actions/cache@v4
+        with:
+          path: |
+            resources
+            third_party
+          key: deps-linux-v1
+      - run: bash scripts/fetch-deps.sh
+      # trap 模式：UB 编译成 trap 指令，不依赖 libubsan。
+      # 和本地 win-ubsan 预设用的是同一套选项，行为一致。
+      - name: Configure (UBSan)
+        run: |
+          cmake -S . -B build/ci-ubsan -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DMYLIB_SANITIZE=undefined
+      - name: Build
+        run: cmake --build build/ci-ubsan
+      - name: Test
+        run: ctest --test-dir build/ci-ubsan --output-on-failure
+
+  # ---------------------------------------------------------------- ASan
+  linux-asan:
+    name: Linux / gcc / ASan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - uses: actions/cache@v4
+        with:
+          path: |
+            resources
+            third_party
+          key: deps-linux-v1
+      - run: bash scripts/fetch-deps.sh
+      - name: Configure (ASan + 泄漏检测)
+        run: |
+          cmake -S . -B build/ci-asan -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DMYLIB_SANITIZE=address
+      - name: Build
+        run: cmake --build build/ci-asan
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+        run: ctest --test-dir build/ci-asan --output-on-failure
+
+  # ---------------------------------------------------------------- 最小配置（组件裁剪矩阵）
+  linux-minimal:
+    name: Linux / 最小配置（只留 core+log）
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - uses: actions/cache@v4
+        with:
+          path: |
+            resources
+            third_party
+          key: deps-linux-v1
+      - run: bash scripts/fetch-deps.sh
+      # 验证"组件可独立开关"不是口号：关掉 json/math/infer 之后，
+      # 测试列表会自动缩减，示例里的相关 target 会自动消失而不是编不过。
+      - name: Configure (minimal)
+        run: |
+          cmake -S . -B build/ci-min -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMYLIB_ENABLE_JSON=OFF \
+            -DMYLIB_ENABLE_MATH=OFF \
+            -DMYLIB_ENABLE_INFER=OFF
+      - name: Build
+        run: cmake --build build/ci-min
+      - name: Test
+        run: ctest --test-dir build/ci-min --output-on-failure
+      - name: 确认裁剪真的生效
+        run: |
+          set -e
+          test -f  build/ci-min/src/libmy_cpp_libs_log.a
+          test ! -f build/ci-min/src/libmy_cpp_libs_json.a
+          test ! -f build/ci-min/src/libmy_cpp_libs_math.a
+          test ! -f build/ci-min/src/libmy_cpp_libs_infer.a
+
+  # ---------------------------------------------------------------- 交叉编译（只验证能编能链）
+  cross:
+    name: 交叉编译 ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: armv7
+            packages: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+            toolchain: cmake/toolchains/linux-armv7-cross.cmake
+          - target: aarch64
+            packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            toolchain: cmake/toolchains/linux-aarch64-cross.cmake
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装交叉工具链
+        run: sudo apt-get update && sudo apt-get install -y ninja-build ${{ matrix.packages }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            resources
+            third_party
+          key: deps-linux-v1
+      - run: bash scripts/fetch-deps.sh
+      - name: Configure
+        run: |
+          cmake -S . -B build/ci-${{ matrix.target }} -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=${{ matrix.toolchain }}
+      - name: Build
+        run: cmake --build build/ci-${{ matrix.target }}
+      - name: 校验产物架构
+        run: |
+          set -e
+          f=$(ls build/ci-${{ matrix.target }}/bin/mylib_tests)
+          file "$f"
+
+  # ---------------------------------------------------------------- Windows / MSVC
+  windows-msvc:
+    name: Windows / MSVC
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build/ci -A x64
+          -DMYLIB_ENABLE_CV=OFF
+          -DMYLIB_ENABLE_NCNN=OFF
+      - name: Build
+        run: cmake --build build/ci --config Release
+      - name: Test
+        run: ctest --test-dir build/ci -C Release --output-on-failure
+
+  # ---------------------------------------------------------------- Windows / MinGW + UBSan
+  windows-mingw:
+    name: Windows / MinGW + UBSan
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+      - name: Configure (UBSan, trap 模式)
+        run: |
+          cmake -S . -B build/ci-ubsan -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DMYLIB_SANITIZE=undefined \
+            -DMYLIB_ENABLE_CV=OFF \
+            -DMYLIB_ENABLE_NCNN=OFF
+      - name: Build
+        run: cmake --build build/ci-ubsan
+      - name: Test
+        run: ctest --test-dir build/ci-ubsan --output-on-failure

@@ -8,6 +8,8 @@
 
 namespace m = my::math;
 
+MYTEST_SUITE("math");
+
 MYTEST_CASE(math_scalar_helpers) {
     CHECK_NEAR(m::deg2rad(180.0), m::kPi, 1e-12);
     CHECK_NEAR(m::rad2deg(m::kPi), 180.0, 1e-12);

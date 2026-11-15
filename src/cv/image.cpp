@@ -80,10 +80,15 @@ Result<PreparedImage> prepare(const Image& src, const PreprocessSpec& spec) {
         resized.copyTo(out.image(::cv::Rect(x, y, std::min(new_w, dst_w - x),
                                           std::min(new_h, dst_h - y))));
     } else {
-        out.letterbox.scale = std::min(static_cast<float>(dst_w) / bgr.value().cols,
-                                       static_cast<float>(dst_h) / bgr.value().rows);
-        out.letterbox.pad_x = 0;
-        out.letterbox.pad_y = 0;
+        // 直接拉伸：两个方向的缩放比例不同，必须分别记下来，
+        // 否则 unletterbox_boxes() 没法把框还原（见 Letterbox 注释）
+        out.letterbox.scale_x =
+            static_cast<float>(dst_w) / static_cast<float>(bgr.value().cols);
+        out.letterbox.scale_y =
+            static_cast<float>(dst_h) / static_cast<float>(bgr.value().rows);
+        out.letterbox.scale   = out.letterbox.scale_x;  // stretch 模式下只作参考
+        out.letterbox.pad_x   = 0;
+        out.letterbox.pad_y   = 0;
         ::cv::resize(bgr.value(), out.image, ::cv::Size(dst_w, dst_h), 0.0, 0.0, spec.interpolation);
     }
 

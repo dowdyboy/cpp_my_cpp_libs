@@ -51,14 +51,19 @@ auto m = r.map([](int x) { return x * 2; });   // 失败会原样传递
 | `NotInitialized` | 需要先 init |
 | `RuntimeError` | 运行期失败（模型加载失败、矩阵奇异） |
 
+> `value()` 在失败状态被调用时会先往 stderr 打一行
+> `[my_cpp_libs] Result<T>::value() 在失败状态被调用: <code>: <message>`，然后 `abort()`。
+> 嵌入式上"莫名重启"至少能留下一条线索；测试里请用 `CHECK_OK_VALUE` 而不是裸 `.value()`。
+
 ### BuildInfo
 
 ```cpp
 my::BuildInfo::summary();
-// "my_cpp_libs 0.1.0 | arm-linux-gnueabihf | gcc 13.3.0 | Release | cross | ptr=32"
+// "my_cpp_libs 0.1.0 | arm-linux-gnueabihf | gcc 13.3.0 | Release | cross | @33817a257a73 | ptr=32"
+my::BuildInfo::gitCommit();   // "33817a257a73"（工作区有未提交改动时带 "-dirty"）
 ```
 
-上板第一件事就该打这一行——确认跑的是预期的产物。
+上板第一件事就该打这一行——确认跑的是**哪一次提交**的产物，而不只是版本号。
 
 ---
 
@@ -385,9 +390,9 @@ my::infer::image_to_tensor(img, h, w, 3, spec, tensor);
 
 | 函数 | 用途 |
 |---|---|
-| `image_to_tensor` | u8 HWC → f32 NCHW/NHWC，含颜色顺序与归一化 |
-| `hwc_to_chw` / `normalize` | 已转 float 时的单独步骤 |
-| `letterbox_params` / `unletterbox_box` | 等比缩放 + 居中填充，以及把框映射回原图 |
+| `image_to_tensor` | u8 HWC → f32 NCHW/NHWC，含颜色顺序与归一化；4 通道输入会**丢弃 alpha**、输出 3 通道 |
+| `hwc_to_chw` / `normalize` | 已转 float 时的单独步骤；`normalize(src, pixels, channels, spec, out)` 按 `spec.layout` 取通道参数 |
+| `letterbox_params` / `unletterbox_box` | 等比缩放 + 居中填充，以及把框映射回原图；`Letterbox` 带 `scale_x/scale_y`，**拉伸模式也还原得回来** |
 | `softmax` / `argmax` / `topk` | 分类后处理 |
 | `topk_softmax` | 一步拿到 top-k 概率 |
 | `iou` / `nms` | 检测后处理（按类别抑制） |

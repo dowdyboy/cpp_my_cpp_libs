@@ -2,9 +2,14 @@
 
 #include <my_cpp_libs/log/log.hpp>
 
+#include <spdlog/sinks/null_sink.h>
+#include <spdlog/spdlog.h>
+
 #include <filesystem>
 #include <string>
 #include <vector>
+
+MYTEST_SUITE("log");
 
 MYTEST_CASE(log_level_names) {
     CHECK_EQ(std::string(my::log::level_name(my::log::Level::Trace)), std::string("trace"));
@@ -121,4 +126,73 @@ MYTEST_CASE(log_before_init_is_safe) {
     CHECK(!my::log::is_initialized());
     my::log::write(my::log::Level::Info, "这条会走 stderr 兜底");
     my::log::flush();
+}
+
+// 重复 init 时若新配置非法，旧配置必须继续可用（不能先拆后建）
+MYTEST_CASE(log_failed_reinit_keeps_old_config) {
+    std::error_code ec;
+    std::filesystem::create_directories("output", ec);
+
+    my::log::Config good;
+    good.to_console   = false;
+    good.file_path    = "output/test_log_keep.log";
+    good.rotate_bytes = 0;
+    good.level        = my::log::Level::Warn;
+    CHECK_OK(my::log::init(good));
+    CHECK(my::log::is_initialized());
+
+    my::log::Config bad;
+    bad.to_console = false;
+    bad.file_path.clear();
+    CHECK_ERR(my::log::init(bad));
+
+    // 旧配置仍在：状态、级别、写入路径都没被拆掉
+    CHECK(my::log::is_initialized());
+    CHECK_EQ(static_cast<int>(my::log::level()), static_cast<int>(my::log::Level::Warn));
+    my::log::write(my::log::Level::Warn, "旧配置仍然可用");
+    my::log::flush();
+
+    my::log::shutdown();
+}
+
+MYTEST_CASE(log_async_roundtrip) {
+    std::error_code ec;
+    std::filesystem::create_directories("output", ec);
+
+    my::log::Config cfg;
+    cfg.to_console       = false;
+    cfg.file_path        = "output/test_log_async.log";
+    cfg.rotate_bytes     = 0;
+    cfg.level            = my::log::Level::Info;
+    cfg.async            = true;
+    cfg.async_queue_size = 256;
+
+    CHECK_OK(my::log::init(cfg));
+    for (int i = 0; i < 100; ++i) my::log::write(my::log::Level::Info, "async 一行");
+    my::log::flush();
+    my::log::shutdown();
+    CHECK(!my::log::is_initialized());
+}
+
+// 本库的 init/shutdown 只管理自己创建的 logger：
+// 不能调用 spdlog::shutdown()，否则宿主 register 过的 logger 会被一起清掉。
+MYTEST_CASE(log_does_not_disturb_host_spdlog) {
+    std::error_code ec;
+    std::filesystem::create_directories("output", ec);
+
+    auto host = spdlog::create<spdlog::sinks::null_sink_mt>("host-owned");
+    CHECK(spdlog::get("host-owned") != nullptr);
+
+    my::log::Config cfg;
+    cfg.to_console   = false;
+    cfg.file_path    = "output/test_log_coexist.log";
+    cfg.rotate_bytes = 0;
+    CHECK_OK(my::log::init(cfg));
+    my::log::write(my::log::Level::Info, "mylib 写一行");
+    my::log::shutdown();
+
+    CHECK(spdlog::get("host-owned") != nullptr);
+    host->info("宿主 logger 仍然可用");
+    host->flush();
+    spdlog::drop("host-owned");
 }

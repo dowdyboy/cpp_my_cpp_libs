@@ -1,6 +1,6 @@
 {
-  "version": 6,
-  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "version": 4,
+  "cmakeMinimumRequired": { "major": 3, "minor": 23, "patch": 0 },
   "configurePresets": [
     {
       "name": "base",
@@ -44,6 +44,19 @@
     },
 
     {
+      "name": "win-ubsan",
+      "displayName": "Windows x64 / MinGW + UBSan (trap-on-error)",
+      "description": "未定义行为检测档：UB 编译成 trap 指令，不依赖 libubsan，MinGW 也能开",
+      "inherits": "win-mingw",
+      "binaryDir": "${sourceDir}/build/win-ubsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "MYLIB_SANITIZE": "undefined"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+
+    {
       "name": "linux-x64",
       "displayName": "Linux x86_64 (交叉编译, gcc 9.3 / glibc 2.31)",
       "inherits": "base",
@@ -56,7 +69,8 @@
     },
     {
       "name": "linux-armv7",
-      "displayName": "Linux armv7-A 硬浮点 (Zynq-7000 / Cortex-A9)",
+      "displayName": "Linux armv7-A 硬浮点（2024 版 SDK / glibc 2.39）",
+      "description": "**编译链接验证**用。产物的 glibc 要求 >=2.38，PetaLinux 2020.2(glibc 2.30) 的板子跑不起来 —— 上板请用 linux-armv7-static 或 linux-armv7-sdk2020",
       "inherits": "base",
       "generator": "Ninja",
       "toolchainFile": "${sourceDir}/cmake/toolchains/linux-armv7-zynq.cmake",
@@ -66,8 +80,48 @@
       }
     },
     {
+      "name": "linux-armv7-static",
+      "displayName": "Linux armv7-A 全静态（板端 glibc 不匹配时的逃生路线）",
+      "description": "自带 libc/libstdc++/ncnn，板上不依赖任何库；ORT 必须关（动态库没法静态化）",
+      "inherits": "base",
+      "generator": "Ninja",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/linux-armv7-zynq.cmake",
+      "binaryDir": "${sourceDir}/build/linux-armv7-static",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_MAKE_PROGRAM": "D:/ProgramFiles/ninja-win/ninja.exe",
+        "MYLIB_ENABLE_ONNXRUNTIME": "OFF",
+        "MYLIB_ENABLE_NCNN": "ON",
+        "MYLIB_BUILD_EXAMPLES": "OFF",
+        "CMAKE_EXE_LINKER_FLAGS": "-static"
+      }
+    },
+    {
+      "name": "linux-armv7-sdk2020",
+      "displayName": "Zynq-7020 / PetaLinux 2020.2 SDK（glibc 2.30）",
+      "description": "板子的正解：配套 SDK 编译，动态链接也能跑。只能在装好 SDK 的 Linux 上配置",
+      "inherits": "base",
+      "generator": "Ninja",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/petalinux-2020.2-zynq.cmake",
+      "binaryDir": "${sourceDir}/build/linux-armv7-sdk2020",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+    },
+    {
+      "name": "linux-armv7-cross",
+      "displayName": "Linux armv7-A（apt 工具链，仅编译验证 / CI）",
+      "description": "编译器从 PATH 找 arm-linux-gnueabihf-gcc；宿主必须是 Linux",
+      "inherits": "base",
+      "generator": "Ninja",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/linux-armv7-cross.cmake",
+      "binaryDir": "${sourceDir}/build/linux-armv7-cross",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+    },
+    {
       "name": "linux-aarch64",
-      "displayName": "Linux aarch64 (ZynqMP / 通用 ARM64)",
+      "displayName": "Linux aarch64 (ZynqMP / 通用 ARM64，ARM GNU 14.2)",
+      "description": "自带 glibc 约 2.40；板子更老的话把 SYSROOT 换成板子的（-DMYLIB_TARGET_SYSROOT=...）",
       "inherits": "base",
       "generator": "Ninja",
       "toolchainFile": "${sourceDir}/cmake/toolchains/linux-aarch64.cmake",
@@ -75,15 +129,31 @@
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_MAKE_PROGRAM": "D:/ProgramFiles/ninja-win/ninja.exe"
       }
+    },
+    {
+      "name": "linux-aarch64-cross",
+      "displayName": "Linux aarch64（apt 工具链，仅编译验证 / CI）",
+      "description": "编译器从 PATH 找 aarch64-linux-gnu-gcc；宿主必须是 Linux",
+      "inherits": "base",
+      "generator": "Ninja",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/linux-aarch64-cross.cmake",
+      "binaryDir": "${sourceDir}/build/linux-aarch64-cross",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
     }
   ],
 
   "buildPresets": [
     { "name": "win-msvc",     "configurePreset": "win-msvc", "configuration": "Release" },
     { "name": "win-mingw",    "configurePreset": "win-mingw" },
+    { "name": "win-ubsan",    "configurePreset": "win-ubsan" },
     { "name": "linux-x64",    "configurePreset": "linux-x64" },
     { "name": "linux-armv7",  "configurePreset": "linux-armv7" },
-    { "name": "linux-aarch64","configurePreset": "linux-aarch64" }
+    { "name": "linux-armv7-static", "configurePreset": "linux-armv7-static" },
+    { "name": "linux-armv7-sdk2020", "configurePreset": "linux-armv7-sdk2020" },
+    { "name": "linux-armv7-cross",   "configurePreset": "linux-armv7-cross" },
+    { "name": "linux-aarch64","configurePreset": "linux-aarch64" },
+    { "name": "linux-aarch64-cross", "configurePreset": "linux-aarch64-cross" }
   ],
 
   "testPresets": [
@@ -96,6 +166,11 @@
     {
       "name": "win-mingw",
       "configurePreset": "win-mingw",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "win-ubsan",
+      "configurePreset": "win-ubsan",
       "output": { "outputOnFailure": true }
     }
   ]

@@ -33,7 +33,8 @@ $presets = @(
     @{ Name = 'win-msvc';     Kind = 'host';  Desc = 'Windows x64 / MSVC (VS 2026)' },
     @{ Name = 'win-mingw';    Kind = 'host';  Desc = 'Windows x64 / MinGW-w64 GCC 15.2' },
     @{ Name = 'linux-x64';    Kind = 'cross'; Desc = 'Linux x86_64 / GCC 9.3 (glibc 2.31)' },
-    @{ Name = 'linux-armv7';  Kind = 'cross'; Desc = 'Linux armv7-A HF / Zynq-7000 Cortex-A9' },
+    @{ Name = 'linux-armv7';  Kind = 'cross'; Desc = 'Linux armv7-A HF / 2024 SDK (glibc 2.39，仅供编译验证)' },
+    @{ Name = 'linux-armv7-static'; Kind = 'cross'; Desc = 'Linux armv7-A 全静态（可上板）' },
     @{ Name = 'linux-aarch64';Kind = 'cross'; Desc = 'Linux aarch64 / ARM GNU 14.2' }
 )
 

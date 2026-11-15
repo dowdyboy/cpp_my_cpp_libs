@@ -188,9 +188,17 @@ if(MYLIB_ENABLE_INFER AND MYLIB_ENABLE_ONNXRUNTIME)
     # e_machine 是偏移 18 处的 2 字节小端整数：ARM=0x28, AArch64=0xB7, x86-64=0x3E
 
     # ---- 收集候选目录 ----
+    # 顺序 = 用户显式指定（最高优先） + third_party 下的自动扫描（file(GLOB) 有序，可复现）
     set(_ort_candidates "")
     if(MYLIB_ONNXRUNTIME_ROOT)
-        list(APPEND _ort_candidates "${MYLIB_ONNXRUNTIME_ROOT}")
+        if(EXISTS "${MYLIB_ONNXRUNTIME_ROOT}/include/onnxruntime_cxx_api.h")
+            list(APPEND _ort_candidates "${MYLIB_ONNXRUNTIME_ROOT}")
+        else()
+            # 旧的构建目录里可能残留一个早就被删掉/换掉的路径，不清理就会一直选不上新包
+            message(STATUS "[deps] 忽略失效的 MYLIB_ONNXRUNTIME_ROOT=${MYLIB_ONNXRUNTIME_ROOT}"
+                           "（目录里没有 onnxruntime_cxx_api.h）")
+            set(MYLIB_ONNXRUNTIME_ROOT "" CACHE PATH "ONNX Runtime 根目录（留空则自动探测）" FORCE)
+        endif()
     endif()
     file(GLOB _ort_dirs "${MYLIB_DEPS_DIR}/onnxruntime-*")
     list(APPEND _ort_candidates ${_ort_dirs})
@@ -230,7 +238,11 @@ if(MYLIB_ENABLE_INFER AND MYLIB_ENABLE_ONNXRUNTIME)
                 set(_ort_root "${_c}")
                 break()
             endif()
-            list(APPEND _ort_rejected "${_c}/lib/onnxruntime.lib")
+            if(EXISTS "${_c}/lib/onnxruntime.lib")
+                list(APPEND _ort_rejected "${_c}（MSVC 导入库，MinGW 不可用）")
+            else()
+                list(APPEND _ort_rejected "${_c}（不是 Windows x64 包）")
+            endif()
         else()
             if(NOT _ort_want_arch)
                 continue()
@@ -248,7 +260,11 @@ if(MYLIB_ENABLE_INFER AND MYLIB_ENABLE_ONNXRUNTIME)
 
     if(_ort_root)
         set(MYLIB_INFER_BACKEND "onnxruntime")
-        set(MYLIB_ONNXRUNTIME_ROOT "${_ort_root}" CACHE PATH "ONNX Runtime 根目录" FORCE)
+        # 只记录"探测结果"，**不回写 CACHE**。
+        # 回写（set(... CACHE ... FORCE)）会让下一次 configure 把上次的选择当成人
+        # 用户意图放在候选第一位，于是 third_party 里新出现的包永远选不上 —— 同一份源码、
+        # 同一个 preset，新旧构建目录会链上不同版本的 ORT（1.23.2 vs 1.18.1）。
+        set(MYLIB_ORT_ROOT_DETECTED "${_ort_root}")
         add_library(deps_ort INTERFACE)
         add_library(deps::onnxruntime ALIAS deps_ort)
         target_include_directories(deps_ort INTERFACE "${_ort_root}/include")
@@ -258,11 +274,20 @@ if(MYLIB_ENABLE_INFER AND MYLIB_ENABLE_ONNXRUNTIME)
         else()
             target_link_libraries(deps_ort INTERFACE "${_ort_root}/lib/libonnxruntime.so")
         endif()
-        message(STATUS "[deps] ONNX Runtime: ${_ort_root} (${_ort_want_arch})")
+        get_filename_component(_ort_name "${_ort_root}" NAME)
+        message(STATUS "[deps] ONNX Runtime: ${_ort_name} (${_ort_want_arch})")
     elseif(_ort_rejected)
         string(REPLACE ";" "\n    " _rej "${_ort_rejected}")
-        message(STATUS "[deps] 找到了 ONNX Runtime 包但架构/编译器不匹配：\n    ${_rej}\n"
-                       "      目标: ${CMAKE_SYSTEM_PROCESSOR} / ${CMAKE_CXX_COMPILER_ID} —— 回退 stub 后端")
+        if(WIN32 AND NOT MSVC)
+            message(STATUS "[deps] 找到了 ONNX Runtime 包，但当前是 MinGW 构建，**故意不用**：\n"
+                           "      ONNX Runtime 的 Windows 包是 MSVC ABI（.lib + .dll），\n"
+                           "      跨 CRT 传 std::string 是未定义行为，链上了也可能诡异崩溃。\n"
+                           "      -> infer 回退 stub 后端；要真跑推理请用 win-msvc 预设。\n"
+                           "      候选: ${_rej}")
+        else()
+            message(STATUS "[deps] 找到了 ONNX Runtime 包但架构不匹配：\n    ${_rej}\n"
+                           "      目标: ${CMAKE_SYSTEM_PROCESSOR} —— 回退 stub 后端")
+        endif()
     else()
         message(STATUS "[deps] 未找到 ONNX Runtime —— infer 组件使用 stub 后端")
     endif()
@@ -333,6 +358,7 @@ if(MYLIB_ENABLE_NCNN)
 
     if(_ncnn_root)
         set(MYLIB_HAVE_NCNN ON)
+        set(MYLIB_NCNN_ROOT_DETECTED "${_ncnn_root}")
         add_library(deps_ncnn INTERFACE)
         add_library(deps::ncnn ALIAS deps_ncnn)
         target_include_directories(deps_ncnn INTERFACE "${_ncnn_root}/include")

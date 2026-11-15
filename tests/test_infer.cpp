@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+MYTEST_SUITE("infer");
+
 MYTEST_CASE(infer_dtype_helpers) {
     CHECK_EQ(my::infer::dtype_size(my::infer::DType::Float32), std::size_t{4});
     CHECK_EQ(my::infer::dtype_size(my::infer::DType::Int64), std::size_t{8});

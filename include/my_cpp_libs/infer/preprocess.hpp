@@ -40,29 +40,47 @@ struct NormalizeSpec {
 
 /// HWC 的 u8 图像 -> f32 张量（batch=1）
 /// src 长度必须 >= height * width * channels
+///
+/// channels 支持 1 / 3 / 4：
+///   * 1   -> 输出 1 通道（用 mean[0] / stddev[0]）
+///   * 3   -> 输出 3 通道
+///   * 4   -> **丢弃 alpha**，输出 3 通道（BGRA / RGBA 图片很常见，模型输入一般只要 3 通道）
+/// 因此 out.size() 恒为 height * width * min(channels, 3)，不会出现"第 4 个平面全是 0"的半成品。
 Status image_to_tensor(const std::uint8_t* src, int height, int width, int channels,
                        const NormalizeSpec& spec, std::vector<float>& out);
 
 /// HWC -> NCHW（f32，原地不可，需要目标缓冲）
 Status hwc_to_chw(const float* src, int height, int width, int channels, std::vector<float>& out);
 
-/// f32 图像归一化（不改变布局），用于已经转成 float 的场景
-Status normalize(const float* src, std::size_t count, const NormalizeSpec& spec,
+/// f32 图像归一化（不改变布局），用于已经转成 float 的场景。
+/// 缓冲按 channels 个通道解释：NCHW 为 [C][pixels]，NHWC 为 [pixels][C]，
+/// 因此 count 必须恰好是 pixels * channels。
+Status normalize(const float* src, std::size_t pixels, int channels, const NormalizeSpec& spec,
                  std::vector<float>& out);
 
 // -----------------------------------------------------------------------------
 //  letterbox
 // -----------------------------------------------------------------------------
+/// 几何参数：把原图坐标映射到模型输入坐标需要"先缩放、再平移"。
+///
+/// 两种模式都覆盖：
+///   * 等比缩放（letterbox）：scale_x == scale_y == scale，pad_x / pad_y 居中填充；
+///   * 直接拉伸（stretch）：scale_x 与 scale_y 通常不同，pad 为 0。
+///
+/// **不要用 scale 做逆变换**：stretch 模式下它没有意义，一律用 scale_x / scale_y
+/// （`unletterbox_box()` 已经这么做）。
 struct Letterbox {
-    float scale = 1.0f;  ///< 缩放比例（等比）
-    int   pad_x = 0;     ///< 左侧填充
-    int   pad_y = 0;     ///< 顶部填充
+    float scale   = 1.0f;  ///< 等比缩放比例；stretch 模式下等于 scale_x（仅供参考）
+    float scale_x = 1.0f;  ///< x 方向缩放比例（模型输入宽 / 原图宽）
+    float scale_y = 1.0f;  ///< y 方向缩放比例（模型输入高 / 原图高）
+    int   pad_x   = 0;     ///< 左侧填充
+    int   pad_y   = 0;     ///< 顶部填充
 };
 
-/// 计算把 src 等比放进 dst 的缩放与填充（居中）
+/// 计算把 src 等比放进 dst 的缩放与填充（居中）。拉伸模式请自行填 scale_x / scale_y。
 Letterbox letterbox_params(int src_width, int src_height, int dst_width, int dst_height) noexcept;
 
-/// 把模型输入坐标系下的框映射回原图坐标系（就地修改）
+/// 把模型输入坐标系下的框映射回原图坐标系（就地修改，不裁剪到原图边界）
 void unletterbox_box(float& x1, float& y1, float& x2, float& y2, const Letterbox& lb) noexcept;
 
 // -----------------------------------------------------------------------------

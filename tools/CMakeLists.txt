@@ -12,7 +12,7 @@ set(MYLIB_TOOL_BIN_DIR "${CMAKE_BINARY_DIR}/bin")
 function(mylib_add_tool name)
     cmake_parse_arguments(ARG "" "" "SOURCES;LINK" ${ARGN})
     add_executable(${name} ${ARG_SOURCES})
-    target_link_libraries(${name} PRIVATE ${ARG_LINK} mylib_warnings)
+    target_link_libraries(${name} PRIVATE ${ARG_LINK} mylib_warnings mylib_sanitize)
     set_target_properties(${name} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${MYLIB_TOOL_BIN_DIR}"
         CXX_STANDARD 17
@@ -22,7 +22,9 @@ function(mylib_add_tool name)
         set_target_properties(${name} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY_${cfg_upper} "${MYLIB_TOOL_BIN_DIR}/${cfg}")
     endforeach()
-    mylib_copy_runtime_dlls(${name})
+    if("mylib_infer" IN_LIST ARG_LINK OR "mylib_cv" IN_LIST ARG_LINK)
+        mylib_copy_runtime_dlls(${name})
+    endif()
 endfunction()
 
 if(TARGET mylib_infer)

@@ -31,6 +31,10 @@ struct BuildInfo {
     /// 目标三元组，如 "arm-linux-gnueabihf"
     static const char* targetTriple() noexcept;
 
+    /// 源码的 git commit（短 hash；工作区有未提交改动时带 "-dirty"）。
+    /// 不是 git 仓库或没装 git 时为 "unknown"。
+    static const char* gitCommit() noexcept;
+
     /// 编译期是否在交叉编译
     static bool isCrossCompiled() noexcept;
 

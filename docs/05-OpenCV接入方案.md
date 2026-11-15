@@ -124,9 +124,11 @@ struct PreprocessSpec {
 
 // letterbox 的几何参数，后处理要用它把框映射回原图
 struct LetterboxInfo {
-    float scale = 1.0f;
-    int   pad_x = 0;
-    int   pad_y = 0;
+    float scale   = 1.0f;   // 等比缩放比例（stretch 模式下等于 scale_x，仅供参考）
+    float scale_x = 1.0f;   // x 方向比例：拉伸模式下与 scale_y 不同，逆变换必须分别用
+    float scale_y = 1.0f;
+    int   pad_x   = 0;
+    int   pad_y   = 0;
 };
 
 struct PreparedImage {
@@ -150,7 +152,12 @@ void unletterbox_boxes(float* boxes, std::size_t count, const LetterboxInfo& inf
 - `prepare()` 一次完成 **resize → letterbox → 颜色转换 → 归一化 → HWC→CHW**，
   这些都是"错了不报错、只出错误结果"的环节，集中在一个函数里才不会各写各的；
 - `LetterboxInfo` 必须跟着 `tensor` 一起返回，否则后处理没法把框还原到原图；
+- `keep_aspect=false`（拉伸）时 x/y 两个方向的比例不同，`scale_x` / `scale_y` 必须分开记，
+  只留一个 `scale` 会让框在 y 方向整体偏移（这是 F 期修掉的缺陷之一）；
 - 底下调用 `my::infer` 的纯数组预处理函数（见 §5），OpenCV 只负责解码和缩放。
+
+> 上面是设计草案，最终落地签名以 [02-API设计](02-API设计.md) §6 为准
+> （例如归一化参数收进了 `NormalizeSpec`，`layout` 用枚举而不是 `nchw` 布尔）。
 
 ### 4.3 CMake 接入
 

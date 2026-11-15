@@ -7,6 +7,8 @@
 
 using namespace my::infer;
 
+MYTEST_SUITE("preprocess");
+
 // -----------------------------------------------------------------------------
 //  图像 -> 张量
 // -----------------------------------------------------------------------------
@@ -95,6 +97,118 @@ MYTEST_CASE(preprocess_errors) {
     CHECK_ERR(image_to_tensor(src, 1, 1, 3, spec, out));
 }
 
+// 4 通道输入必须丢弃 alpha 并**输出 3 通道**：
+// 以前的实现按 4 通道分配缓冲，NCHW 下第 4 个平面恒为 0，
+// NHWC 下步长与 4 不一致 -> 数值整体错位，且不会报任何错。
+MYTEST_CASE(preprocess_bgra_drops_alpha) {
+    // 2 个像素，BGRA
+    const std::uint8_t src[2 * 4] = {10, 20, 30, 255, 40, 50, 60, 128};
+
+    NormalizeSpec spec;
+    spec.src_order = ColorOrder::BGR;
+    spec.dst_order = ColorOrder::RGB;
+    spec.layout    = Layout::NCHW;
+    spec.scale     = 1.0f;
+
+    std::vector<float> out;
+    CHECK_OK(image_to_tensor(src, 1, 2, 4, spec, out));
+    CHECK_EQ(out.size(), std::size_t{6});  // 2 像素 × 3 通道
+
+    // [R 平面][G 平面][B 平面]
+    CHECK_NEAR(out[0], 30.0, 1e-6);
+    CHECK_NEAR(out[1], 60.0, 1e-6);
+    CHECK_NEAR(out[2], 20.0, 1e-6);
+    CHECK_NEAR(out[3], 50.0, 1e-6);
+    CHECK_NEAR(out[4], 10.0, 1e-6);
+    CHECK_NEAR(out[5], 40.0, 1e-6);
+}
+
+MYTEST_CASE(preprocess_rgba_nhwc_drops_alpha) {
+    // 2 个像素，RGBA，NHWC 排布
+    const std::uint8_t src[2 * 4] = {1, 2, 3, 4, 5, 6, 7, 8};
+
+    NormalizeSpec spec;
+    spec.src_order = ColorOrder::RGB;
+    spec.dst_order = ColorOrder::RGB;
+    spec.layout    = Layout::NHWC;
+    spec.scale     = 1.0f;
+
+    std::vector<float> out;
+    CHECK_OK(image_to_tensor(src, 1, 2, 4, spec, out));
+    CHECK_EQ(out.size(), std::size_t{6});
+    // 像素 0 的 RGB 要紧挨着，不能按 4 的步长错位
+    CHECK_NEAR(out[0], 1.0, 1e-6);
+    CHECK_NEAR(out[1], 2.0, 1e-6);
+    CHECK_NEAR(out[2], 3.0, 1e-6);
+    CHECK_NEAR(out[3], 5.0, 1e-6);
+    CHECK_NEAR(out[4], 6.0, 1e-6);
+    CHECK_NEAR(out[5], 7.0, 1e-6);
+}
+
+// 归一化必须按 layout 找通道：
+// 老实现按 i % 3 取 mean/stddev，对 NCHW 数据等于把均值按像素轮转施加。
+MYTEST_CASE(preprocess_normalize_nchw) {
+    // 2 像素 3 通道，NCHW：[R0 R1][G0 G1][B0 B1]
+    const float src[6] = {10, 20, 30, 40, 50, 60};
+
+    NormalizeSpec spec;
+    spec.layout = Layout::NCHW;
+    spec.scale  = 1.0f;
+    spec.mean   = {1.0f, 2.0f, 3.0f};
+    spec.stddev = {2.0f, 4.0f, 5.0f};
+
+    std::vector<float> out;
+    CHECK_OK(normalize(src, 2, 3, spec, out));
+    CHECK_EQ(out.size(), std::size_t{6});
+
+    CHECK_NEAR(out[0], (10.0f - 1.0f) / 2.0f, 1e-6);
+    CHECK_NEAR(out[1], (20.0f - 1.0f) / 2.0f, 1e-6);
+    CHECK_NEAR(out[2], (30.0f - 2.0f) / 4.0f, 1e-6);
+    CHECK_NEAR(out[3], (40.0f - 2.0f) / 4.0f, 1e-6);
+    CHECK_NEAR(out[4], (50.0f - 3.0f) / 5.0f, 1e-6);
+    CHECK_NEAR(out[5], (60.0f - 3.0f) / 5.0f, 1e-6);
+}
+
+MYTEST_CASE(preprocess_normalize_nhwc) {
+    // 2 像素 3 通道，NHWC：[RGB0][RGB1]
+    const float src[6] = {10, 30, 50, 20, 40, 60};
+
+    NormalizeSpec spec;
+    spec.layout = Layout::NHWC;
+    spec.scale  = 1.0f;
+    spec.mean   = {1.0f, 2.0f, 3.0f};
+    spec.stddev = {2.0f, 4.0f, 5.0f};
+
+    std::vector<float> out;
+    CHECK_OK(normalize(src, 2, 3, spec, out));
+    CHECK_EQ(out.size(), std::size_t{6});
+
+    CHECK_NEAR(out[0], (10.0f - 1.0f) / 2.0f, 1e-6);
+    CHECK_NEAR(out[1], (30.0f - 2.0f) / 4.0f, 1e-6);
+    CHECK_NEAR(out[2], (50.0f - 3.0f) / 5.0f, 1e-6);
+    CHECK_NEAR(out[3], (20.0f - 1.0f) / 2.0f, 1e-6);
+    CHECK_NEAR(out[4], (40.0f - 2.0f) / 4.0f, 1e-6);
+    CHECK_NEAR(out[5], (60.0f - 3.0f) / 5.0f, 1e-6);
+}
+
+MYTEST_CASE(preprocess_normalize_errors) {
+    const float src[3] = {1, 2, 3};
+    NormalizeSpec spec;
+    spec.scale = 1.0f;
+    std::vector<float> out;
+
+    CHECK_ERR(normalize(nullptr, 3, 1, spec, out));
+    CHECK_ERR(normalize(src, 0, 1, spec, out));
+    CHECK_ERR(normalize(src, 3, 0, spec, out));
+    CHECK_ERR(normalize(src, 3, 4, spec, out));
+
+    // 只有被实际用到的通道才校验 stddev
+    spec.stddev = {1.0f, 0.0f, 1.0f};
+    CHECK_ERR(normalize(src, 3, 2, spec, out));
+    CHECK_OK(normalize(src, 3, 1, spec, out));
+    CHECK_EQ(out.size(), std::size_t{3});
+}
+
 MYTEST_CASE(preprocess_hwc_to_chw) {
     const float src[1 * 2 * 3] = {1, 2, 3, 4, 5, 6};  // 2 像素 x 3 通道
     std::vector<float> out;
@@ -146,6 +260,38 @@ MYTEST_CASE(preprocess_letterbox_invalid) {
     const Letterbox lb = letterbox_params(0, 100, 640, 640);
     CHECK_NEAR(lb.scale, 1.0, 1e-6);  // 原样返回
     CHECK_EQ(lb.pad_x, 0);
+}
+
+// 拉伸（keep_aspect=false）模式下 x/y 比例不同，只有一个 scale 是还原不出来的。
+MYTEST_CASE(preprocess_letterbox_stretch_roundtrip) {
+    Letterbox lb;
+    lb.scale_x = 32.0f / 160.0f;  // 0.2
+    lb.scale_y = 32.0f / 120.0f;  // 0.2666...
+    lb.scale   = lb.scale_x;
+    lb.pad_x   = 0;
+    lb.pad_y   = 0;
+
+    // 模型坐标系下的整幅图应当还原成 160x120
+    float x1 = 0.0f, y1 = 0.0f, x2 = 32.0f, y2 = 32.0f;
+    unletterbox_box(x1, y1, x2, y2, lb);
+    CHECK_NEAR(x1, 0.0, 1e-3);
+    CHECK_NEAR(y1, 0.0, 1e-3);
+    CHECK_NEAR(x2, 160.0, 1e-3);
+    CHECK_NEAR(y2, 120.0, 1e-3);  // 老实现会给出 32/0.2 = 160，y 方向整体错 1.33 倍
+
+    // 等比模式下三个 scale 字段必须自洽
+    const Letterbox eq = letterbox_params(1280, 720, 640, 640);
+    CHECK_NEAR(eq.scale_x, eq.scale, 1e-6);
+    CHECK_NEAR(eq.scale_y, eq.scale, 1e-6);
+
+    // 比例非法时不能做除法（保持原值，不产生 inf/nan）
+    Letterbox bad;
+    bad.scale_x = 0.0f;
+    bad.scale_y = 0.0f;
+    float a = 1.0f, b = 2.0f, c = 3.0f, d = 4.0f;
+    unletterbox_box(a, b, c, d, bad);
+    CHECK_NEAR(a, 1.0, 1e-9);
+    CHECK_NEAR(d, 4.0, 1e-9);
 }
 
 // -----------------------------------------------------------------------------

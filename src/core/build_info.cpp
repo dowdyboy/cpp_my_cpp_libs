@@ -46,6 +46,7 @@ const char* BuildInfo::compiler() noexcept { return MYLIB_COMPILER_STR; }
 const char* BuildInfo::osName() noexcept { return os_name_impl(); }
 const char* BuildInfo::archName() noexcept { return arch_name_impl(); }
 const char* BuildInfo::targetTriple() noexcept { return MYLIB_TARGET_TRIPLE_STR; }
+const char* BuildInfo::gitCommit() noexcept { return MYLIB_GIT_COMMIT_STR; }
 bool BuildInfo::isCrossCompiled() noexcept { return MYLIB_CROSS_COMPILED != 0; }
 int BuildInfo::pointerBits() noexcept { return MYLIB_PTR_SIZE; }
 
@@ -61,6 +62,8 @@ const char* BuildInfo::summary() noexcept {
         s += " | ";
         s += MYLIB_BUILD_TYPE_STR;
         if (MYLIB_CROSS_COMPILED) s += " | cross";
+        s += " | @";
+        s += MYLIB_GIT_COMMIT_STR;
         s += " | ptr=";
         s += std::to_string(MYLIB_PTR_SIZE);
         return s;

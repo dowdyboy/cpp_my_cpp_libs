@@ -31,10 +31,13 @@ Status image_to_tensor(const std::uint8_t* src, int height, int width, int chann
         if (s == 0.0f) return Status(Errc::InvalidArgument, "归一化 stddev 不能为 0");
     }
 
-    const std::size_t pixel_count = static_cast<std::size_t>(height) * static_cast<std::size_t>(width);
-    const std::size_t plane       = pixel_count;
+    // 4 通道输入丢弃 alpha：NormalizeSpec 的 mean/stddev 本身只有 3 组，
+    // 输出也按 3 通道给，避免出现"分配了 4 个平面、第 4 个恒为 0"的半成品。
+    const int         out_channels = (channels == 1) ? 1 : 3;
+    const std::size_t pixel_count  = static_cast<std::size_t>(height) * static_cast<std::size_t>(width);
+    const std::size_t plane        = pixel_count;
 
-    out.assign(pixel_count * static_cast<std::size_t>(channels), 0.0f);
+    out.assign(pixel_count * static_cast<std::size_t>(out_channels), 0.0f);
 
     const bool nchw = (spec.layout == Layout::NCHW);
 
@@ -44,7 +47,7 @@ Status image_to_tensor(const std::uint8_t* src, int height, int width, int chann
                                   static_cast<std::size_t>(x);
             const std::uint8_t* px = src + p * static_cast<std::size_t>(channels);
 
-            if (channels == 1) {
+            if (out_channels == 1) {
                 const float v =
                     (static_cast<float>(px[0]) * spec.scale - spec.mean[0]) / spec.stddev[0];
                 out[p] = v;
@@ -81,16 +84,31 @@ Status hwc_to_chw(const float* src, int height, int width, int channels, std::ve
     return Ok();
 }
 
-Status normalize(const float* src, std::size_t count, const NormalizeSpec& spec,
+Status normalize(const float* src, std::size_t pixels, int channels, const NormalizeSpec& spec,
                  std::vector<float>& out) {
-    if (src == nullptr || count == 0) return Status(Errc::InvalidArgument, "输入为空");
-    for (float s : spec.stddev) {
-        if (s == 0.0f) return Status(Errc::InvalidArgument, "归一化 stddev 不能为 0");
+    if (src == nullptr || pixels == 0) return Status(Errc::InvalidArgument, "输入为空");
+    if (channels <= 0 || channels > 3) {
+        return Status(Errc::InvalidArgument, "channels 只支持 1/2/3");
     }
-    out.resize(count);
-    for (std::size_t i = 0; i < count; ++i) {
-        const std::size_t c = i % 3;
-        out[i] = (src[i] * spec.scale - spec.mean[c]) / spec.stddev[c];
+    for (int c = 0; c < channels; ++c) {
+        if (spec.stddev[static_cast<std::size_t>(c)] == 0.0f) {
+            return Status(Errc::InvalidArgument, "归一化 stddev 不能为 0");
+        }
+    }
+
+    const bool        nchw = (spec.layout == Layout::NCHW);
+    const std::size_t n    = pixels * static_cast<std::size_t>(channels);
+    out.resize(n);
+
+    for (std::size_t p = 0; p < pixels; ++p) {
+        for (int c = 0; c < channels; ++c) {
+            // 单通道只可能用第 0 组参数
+            const std::size_t mc = (channels == 1) ? 0u : static_cast<std::size_t>(c);
+            const std::size_t i  = nchw ? (static_cast<std::size_t>(c) * pixels + p)
+                                        : (p * static_cast<std::size_t>(channels) +
+                                           static_cast<std::size_t>(c));
+            out[i] = (src[i] * spec.scale - spec.mean[mc]) / spec.stddev[mc];
+        }
     }
     return Ok();
 }
@@ -104,7 +122,9 @@ Letterbox letterbox_params(int src_width, int src_height, int dst_width, int dst
 
     const float sx = static_cast<float>(dst_width) / static_cast<float>(src_width);
     const float sy = static_cast<float>(dst_height) / static_cast<float>(src_height);
-    lb.scale = std::min(sx, sy);
+    lb.scale   = std::min(sx, sy);
+    lb.scale_x = lb.scale;
+    lb.scale_y = lb.scale;
 
     const int new_w = static_cast<int>(std::lround(static_cast<float>(src_width) * lb.scale));
     const int new_h = static_cast<int>(std::lround(static_cast<float>(src_height) * lb.scale));
@@ -114,11 +134,12 @@ Letterbox letterbox_params(int src_width, int src_height, int dst_width, int dst
 }
 
 void unletterbox_box(float& x1, float& y1, float& x2, float& y2, const Letterbox& lb) noexcept {
-    if (lb.scale <= 0.0f) return;
-    x1 = (x1 - static_cast<float>(lb.pad_x)) / lb.scale;
-    y1 = (y1 - static_cast<float>(lb.pad_y)) / lb.scale;
-    x2 = (x2 - static_cast<float>(lb.pad_x)) / lb.scale;
-    y2 = (y2 - static_cast<float>(lb.pad_y)) / lb.scale;
+    // stretch 模式下 scale_x != scale_y，必须分别除，否则框会整体偏移
+    if (lb.scale_x <= 0.0f || lb.scale_y <= 0.0f) return;
+    x1 = (x1 - static_cast<float>(lb.pad_x)) / lb.scale_x;
+    y1 = (y1 - static_cast<float>(lb.pad_y)) / lb.scale_y;
+    x2 = (x2 - static_cast<float>(lb.pad_x)) / lb.scale_x;
+    y2 = (y2 - static_cast<float>(lb.pad_y)) / lb.scale_y;
 }
 
 // -----------------------------------------------------------------------------

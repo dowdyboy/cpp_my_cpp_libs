@@ -8,6 +8,8 @@
 
 // 注意：本文件只在 MYLIB_ENABLE_CV=ON 且找到 OpenCV 时参与编译
 
+MYTEST_SUITE("cv");
+
 MYTEST_CASE(cv_save_and_load) {
     std::error_code ec;
     std::filesystem::create_directories("output", ec);
@@ -87,6 +89,16 @@ MYTEST_CASE(cv_prepare_stretch) {
     CHECK_EQ(prepared.value().letterbox.pad_x, 0);
     CHECK_EQ(prepared.value().letterbox.pad_y, 0);
     CHECK_EQ(prepared.value().image.cols, 32);
+
+    // 拉伸模式下两个方向的比例必须分别记录：32/160 = 0.2，32/120 ≈ 0.2667
+    CHECK_NEAR(prepared.value().letterbox.scale_x, 32.0 / 160.0, 1e-5);
+    CHECK_NEAR(prepared.value().letterbox.scale_y, 32.0 / 120.0, 1e-5);
+
+    // 用 prepare 返回的 letterbox 做逆变换，整幅图必须回到 160x120
+    float box[4] = {0.0f, 0.0f, 32.0f, 32.0f};
+    my::cv::unletterbox_boxes(box, 1, prepared.value().letterbox);
+    CHECK_NEAR(box[2], 160.0, 1e-2);
+    CHECK_NEAR(box[3], 120.0, 1e-2);
 }
 
 MYTEST_CASE(cv_prepare_gray_input) {
