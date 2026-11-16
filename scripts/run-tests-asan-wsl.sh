@@ -3,7 +3,7 @@
 # 目的：在拿到板子之前，先把内存/未定义行为问题挖出来
 set -euo pipefail
 
-SRC=/mnt/d/syncworkspace/cpp_my_cpp_libs
+SRC=$(cd "$(dirname "$0")/.." && pwd)
 BUILD=/tmp/mylib-asan
 
 echo "==> 配置（Debug + ASan + UBSan）"

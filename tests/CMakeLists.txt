@@ -34,9 +34,50 @@ if(TARGET mylib_math)
     list(APPEND _test_links mylib_math)
 endif()
 if(TARGET mylib_infer)
-    list(APPEND _test_sources test_infer.cpp test_preprocess.cpp)
-    list(APPEND _test_suites infer preprocess)
+    list(APPEND _test_sources test_infer.cpp)
+    list(APPEND _test_suites infer)
     list(APPEND _test_links mylib_infer)
+endif()
+
+# preprocess 是独立 target（image/http/cv 也会用到），不能挂在 infer 下面：
+# 否则 -DMYLIB_ENABLE_INFER=OFF 时这 22 个用例会静默消失。
+if(TARGET mylib_preprocess)
+    list(APPEND _test_sources test_preprocess.cpp)
+    list(APPEND _test_suites preprocess)
+    list(APPEND _test_links mylib_preprocess)
+endif()
+
+if(TARGET mylib_dsp)
+    list(APPEND _test_sources test_dsp.cpp)
+    list(APPEND _test_suites dsp)
+    list(APPEND _test_links mylib_dsp)
+endif()
+
+if(TARGET mylib_ml)
+    list(APPEND _test_sources test_ml.cpp)
+    list(APPEND _test_suites ml)
+    list(APPEND _test_links mylib_ml)
+    # golden 文件在源码树的 models/ml/ 下；ctest 的工作目录是 build/，所以要给绝对路径
+    # （target 还没创建，攒着，等 add_executable 之后再挂）
+    list(APPEND _test_defs "MYLIB_TEST_MODELS_DIR=\"${PROJECT_SOURCE_DIR}/models\"")
+endif()
+
+if(TARGET mylib_net)
+    list(APPEND _test_sources test_net.cpp)
+    list(APPEND _test_suites net)
+    list(APPEND _test_links mylib_net)
+endif()
+
+if(TARGET mylib_http)
+    list(APPEND _test_sources test_http.cpp)
+    list(APPEND _test_suites http)
+    list(APPEND _test_links mylib_http)
+endif()
+
+if(TARGET mylib_image)
+    list(APPEND _test_sources test_image.cpp)
+    list(APPEND _test_suites image)
+    list(APPEND _test_links mylib_image)
 endif()
 
 if(TARGET mylib_cv)
@@ -47,6 +88,9 @@ endif()
 
 add_executable(mylib_tests ${_test_sources})
 target_link_libraries(mylib_tests PRIVATE ${_test_links} mylib_warnings mylib_sanitize)
+if(_test_defs)
+    target_compile_definitions(mylib_tests PRIVATE ${_test_defs})
+endif()
 set_target_properties(mylib_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     CXX_STANDARD 17

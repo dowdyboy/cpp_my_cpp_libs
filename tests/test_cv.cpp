@@ -113,6 +113,52 @@ MYTEST_CASE(cv_prepare_gray_input) {
     CHECK_EQ(prepared.value().image.channels(), 3);  // 转成 3 通道
 }
 
+// 灰度模型：以前 prepare 无条件转 3 通道，单通道模型根本喂不进去
+MYTEST_CASE(cv_prepare_gray_model) {
+    my::cv::Image img(4, 4, CV_8UC3, ::cv::Scalar(10, 20, 30));  // BGR
+
+    my::cv::PreprocessSpec spec;
+    spec.input_width  = 4;
+    spec.input_height = 4;
+    spec.keep_aspect  = false;
+    spec.input_channels = 1;  // 模型要 1 通道
+
+    auto prepared = my::cv::prepare(img, spec);
+    CHECK_RESULT(prepared);
+
+    CHECK_EQ(prepared.value().image.channels(), 1);
+    CHECK_EQ(prepared.value().tensor.size(), std::size_t{16});
+    CHECK_EQ(prepared.value().shape.dims[1], std::int64_t{1});
+}
+
+// 4 通道缓冲区到底是 BGRA 还是 RGBA：靠 norm.src_order 区分。
+// 这条以前是"静默按 BGRA 处理"，RGBA 输入会 R/B 互换且不报错。
+MYTEST_CASE(cv_prepare_rgba_order_follows_src_order) {
+    my::cv::Image rgba(1, 1, CV_8UC4);
+    rgba.at<::cv::Vec4b>(0, 0) = ::cv::Vec4b(10, 20, 30, 255);  // 通道 0/1/2 = 10/20/30
+
+    my::cv::PreprocessSpec spec;
+    spec.input_width  = 1;
+    spec.input_height = 1;
+    spec.keep_aspect  = false;
+    spec.norm.scale   = 1.0f / 255.0f;
+    spec.norm.dst_order = my::infer::ColorOrder::RGB;
+
+    // 当成 RGBA：R=10 G=20 B=30
+    spec.norm.src_order = my::infer::ColorOrder::RGB;
+    auto as_rgba = my::cv::prepare(rgba, spec);
+    CHECK_RESULT(as_rgba);
+    CHECK_NEAR(as_rgba.value().tensor[0], 10.0 / 255.0, 1e-6);  // R
+    CHECK_NEAR(as_rgba.value().tensor[2], 30.0 / 255.0, 1e-6);  // B
+
+    // 当成 BGRA：B=10 G=20 R=30 -> 输出 RGB 后 R 应该是 30
+    spec.norm.src_order = my::infer::ColorOrder::BGR;
+    auto as_bgra = my::cv::prepare(rgba, spec);
+    CHECK_RESULT(as_bgra);
+    CHECK_NEAR(as_bgra.value().tensor[0], 30.0 / 255.0, 1e-6);  // R
+    CHECK_NEAR(as_bgra.value().tensor[2], 10.0 / 255.0, 1e-6);  // B
+}
+
 MYTEST_CASE(cv_unletterbox_boxes) {
     const auto lb = my::infer::letterbox_params(160, 120, 32, 32);  // scale 0.2, pad_y 4
 

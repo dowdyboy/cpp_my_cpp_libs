@@ -1,0 +1,87 @@
+{
+  "format": "my_cpp_libs.ml/1",
+  "kind": "classifier",
+  "model": {
+    "onnx": "gbdt_20f.onnx",
+    "sha256": "103F75177AE9D6A7A5F021F2B1863A4DC1C07DB0B695BCFD9C8E5268E96EB11D",
+    "opset": {
+      "ai.onnx.ml": 1,
+      "ai.onnx": 16
+    }
+  },
+  "input": {
+    "name": "input",
+    "dtype": "float32",
+    "n_features": 20,
+    "dims": [
+      -1,
+      20
+    ],
+    "features": [
+      "f0",
+      "f1",
+      "f2",
+      "f3",
+      "f4",
+      "f5",
+      "f6",
+      "f7",
+      "f8",
+      "f9",
+      "f10",
+      "f11",
+      "f12",
+      "f13",
+      "f14",
+      "f15",
+      "f16",
+      "f17",
+      "f18",
+      "f19"
+    ]
+  },
+  "output": {
+    "items": [
+      {
+        "name": "label",
+        "dtype": "int64",
+        "dims": [
+          -1
+        ]
+      },
+      {
+        "name": "probabilities",
+        "dtype": "float",
+        "dims": [
+          -1,
+          2
+        ]
+      }
+    ],
+    "n_classes": 2,
+    "classes": [
+      "0",
+      "1"
+    ],
+    "class_ids": [
+      0,
+      1
+    ]
+  },
+  "preprocess": {
+    "type": "none",
+    "embedded_in_onnx": false
+  },
+  "training": {
+    "sklearn": "1.9.1",
+    "onnx": "1.20.1",
+    "onnxruntime": "1.23.0",
+    "python": "3.13.11",
+    "exported_utc": "2026-11-15T11:47:46Z"
+  },
+  "check": {
+    "max_abs_prob_diff": 9.547181756275336e-08,
+    "argmax_agreement": 1.0,
+    "samples": 256
+  }
+}

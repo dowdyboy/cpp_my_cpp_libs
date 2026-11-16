@@ -6,8 +6,13 @@
 namespace my::cv {
 namespace {
 
-/// 统一成 3 通道 BGR
-Result<Image> to_bgr(const Image& src) {
+/// 统一成 3 通道，**但不改变颜色顺序**。
+///
+/// 关键点：4 通道必须用"只丢 alpha"的转换（BGRA2BGR / RGBA2RGB），
+/// 而不是统一转成 BGR —— 否则缓冲区顺序被悄悄改掉，下游按
+/// norm.src_order 再交换一次，就变成双重交换（R/B 又反回去了）。
+/// 顺序的解释权只留给 `image_to_tensor(src_order, dst_order)`。
+Result<Image> to_three_channels(const Image& src, my::infer::ColorOrder order) {
     if (src.empty()) {
         return Status(Errc::InvalidArgument, "输入图像为空");
     }
@@ -15,12 +20,15 @@ Result<Image> to_bgr(const Image& src) {
         case 3:
             return src;
         case 4: {
-            Image out;
-            ::cv::cvtColor(src, out, ::cv::COLOR_BGRA2BGR);
+            Image     out;
+            const int code = (order == my::infer::ColorOrder::RGB) ? ::cv::COLOR_RGBA2RGB
+                                                                   : ::cv::COLOR_BGRA2BGR;
+            ::cv::cvtColor(src, out, code);
             return out;
         }
         case 1: {
             Image out;
+            // 灰度三通道化后 R=G=B，和顺序无关
             ::cv::cvtColor(src, out, ::cv::COLOR_GRAY2BGR);
             return out;
         }
@@ -55,26 +63,37 @@ Result<PreparedImage> prepare(const Image& src, const PreprocessSpec& spec) {
         return Status(Errc::InvalidArgument, "目标尺寸非法");
     }
 
-    auto bgr = to_bgr(src);
+    auto bgr = to_three_channels(src, spec.norm.src_order);
     if (!bgr) return bgr.status();
+
+    // 通道数：0 = 跟随输入（4 通道丢 alpha 变 3），1 = 灰度模型，3 = 彩色。
+    // 以前这里写死 3 通道，单通道的工业检测模型在 cv 组件下根本喂不进去。
+    Image working  = bgr.value();
+    int   channels = 3;
+    if (spec.input_channels == 1) {
+        ::cv::cvtColor(bgr.value(), working, ::cv::COLOR_BGR2GRAY);
+        channels = 1;
+    } else if (spec.input_channels != 0 && spec.input_channels != 3) {
+        return Status(Errc::InvalidArgument, "input_channels 只支持 0/1/3");
+    }
 
     PreparedImage out;
     const int dst_w = spec.input_width;
     const int dst_h = spec.input_height;
 
     if (spec.keep_aspect) {
-        out.letterbox = my::infer::letterbox_params(bgr.value().cols, bgr.value().rows, dst_w, dst_h);
+        out.letterbox = my::infer::letterbox_params(working.cols, working.rows, dst_w, dst_h);
 
         const int new_w =
-            std::max(1, static_cast<int>(std::lround(bgr.value().cols * out.letterbox.scale)));
+            std::max(1, static_cast<int>(std::lround(working.cols * out.letterbox.scale)));
         const int new_h =
-            std::max(1, static_cast<int>(std::lround(bgr.value().rows * out.letterbox.scale)));
+            std::max(1, static_cast<int>(std::lround(working.rows * out.letterbox.scale)));
 
         Image resized;
-        ::cv::resize(bgr.value(), resized, ::cv::Size(new_w, new_h), 0.0, 0.0, spec.interpolation);
+        ::cv::resize(working, resized, ::cv::Size(new_w, new_h), 0.0, 0.0, spec.interpolation);
 
         // 画布必须新建：::cv::Mat 的 ROI 不保证连续，不能直接喂给 image_to_tensor
-        out.image = Image(dst_h, dst_w, CV_8UC3, spec.pad_color);
+        out.image = Image(dst_h, dst_w, channels == 1 ? CV_8UC1 : CV_8UC3, spec.pad_color);
         const int x = std::min(out.letterbox.pad_x, std::max(0, dst_w - new_w));
         const int y = std::min(out.letterbox.pad_y, std::max(0, dst_h - new_h));
         resized.copyTo(out.image(::cv::Rect(x, y, std::min(new_w, dst_w - x),
@@ -82,14 +101,12 @@ Result<PreparedImage> prepare(const Image& src, const PreprocessSpec& spec) {
     } else {
         // 直接拉伸：两个方向的缩放比例不同，必须分别记下来，
         // 否则 unletterbox_boxes() 没法把框还原（见 Letterbox 注释）
-        out.letterbox.scale_x =
-            static_cast<float>(dst_w) / static_cast<float>(bgr.value().cols);
-        out.letterbox.scale_y =
-            static_cast<float>(dst_h) / static_cast<float>(bgr.value().rows);
+        out.letterbox.scale_x = static_cast<float>(dst_w) / static_cast<float>(working.cols);
+        out.letterbox.scale_y = static_cast<float>(dst_h) / static_cast<float>(working.rows);
         out.letterbox.scale   = out.letterbox.scale_x;  // stretch 模式下只作参考
         out.letterbox.pad_x   = 0;
         out.letterbox.pad_y   = 0;
-        ::cv::resize(bgr.value(), out.image, ::cv::Size(dst_w, dst_h), 0.0, 0.0, spec.interpolation);
+        ::cv::resize(working, out.image, ::cv::Size(dst_w, dst_h), 0.0, 0.0, spec.interpolation);
     }
 
     // 新建的 ::cv::Mat 内存是连续的；ROI 不是，这里必须确认。
@@ -98,15 +115,15 @@ Result<PreparedImage> prepare(const Image& src, const PreprocessSpec& spec) {
         return Status(Errc::RuntimeError, "内部错误：预处理画布不是连续内存");
     }
 
-    if (auto st = my::infer::image_to_tensor(out.image.data, dst_h, dst_w, 3, spec.norm,
+    if (auto st = my::infer::image_to_tensor(out.image.data, dst_h, dst_w, channels, spec.norm,
                                              out.tensor);
         !st) {
         return st;
     }
 
     out.shape = (spec.norm.layout == my::infer::Layout::NCHW)
-                    ? my::infer::Shape{1, 3, dst_h, dst_w}
-                    : my::infer::Shape{1, dst_h, dst_w, 3};
+                    ? my::infer::Shape{1, channels, dst_h, dst_w}
+                    : my::infer::Shape{1, dst_h, dst_w, channels};
     return out;
 }
 

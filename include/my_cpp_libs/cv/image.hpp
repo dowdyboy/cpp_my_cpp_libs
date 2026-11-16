@@ -46,10 +46,19 @@ struct PreprocessSpec {
     /// false = 直接拉伸到目标尺寸
     bool keep_aspect = true;
 
+    /// 送进模型的通道数：0 = 跟随输入（见下方说明），1 = 灰度模型，3 = 彩色。
+    ///
+    /// 以前这里写死 3 通道：单通道的工业检测模型在 cv 组件下**根本不可用**。
+    /// 现在显式给一个开关；0 表示"输入几通道就几通道"（4 通道的图会丢 alpha 变 3）。
+    int input_channels = 0;
+
     /// 填充颜色（BGR）。训练侧常见的是 114/114/114 或 0
     ::cv::Scalar pad_color{114, 114, 114};
 
     /// 颜色顺序、归一化、NCHW/NHWC
+    ///
+    /// 4 通道的 cv::Mat 约定是 BGRA，但相机/解码库也可能给 RGBA。
+    /// 这里用 src_order 区分：BGR -> 按 BGRA 处理，RGB -> 按 RGBA 处理。
     my::infer::NormalizeSpec norm;
 
     int interpolation = ::cv::INTER_LINEAR;

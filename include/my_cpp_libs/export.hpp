@@ -18,14 +18,6 @@
 #  else
 #    define MYLIB_API
 #  endif
-#  define MYLIB_HAS_SHARED 1
 #else
 #  define MYLIB_API
-#  define MYLIB_HAS_SHARED 0
-#endif
-
-#if defined(_MSC_VER)
-#  define MYLIB_DEPRECATED(msg) [[deprecated(msg)]]
-#else
-#  define MYLIB_DEPRECATED(msg) [[deprecated(msg)]]
 #endif

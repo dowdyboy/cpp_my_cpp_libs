@@ -28,13 +28,16 @@ set(CMAKE_SYSROOT "${MYLIB_TARGET_SYSROOT}")
 
 set(CMAKE_C_FLAGS_INIT   "-march=armv8-a -fno-pie")
 set(CMAKE_CXX_FLAGS_INIT "-march=armv8-a -fno-pie")
-set(CMAKE_EXE_LINKER_FLAGS_INIT    "-no-pie")
-set(CMAKE_SHARED_LINKER_FLAGS_INIT "-no-pie")
+# -no-pie 只给可执行文件。加到共享库上会让链接器去用 crt1.o 找 _start/main，
+# 报 "undefined reference to `main`"（交叉编 OpenCV 的 .so 时踩过）。
+set(CMAKE_EXE_LINKER_FLAGS_INIT "-no-pie")
 
 set(CMAKE_FIND_ROOT_PATH "${CMAKE_SYSROOT}")
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+# 包搜索允许 BOTH：SDK（my_cpp_libs/ORT/OpenCV 的 cmake 配置）通常装在 sysroot 之外，
+# 设成 ONLY 会让消费方 find_package(my_cpp_libs) 直接找不到。
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
 
 set(MYLIB_TARGET_TRIPLE "aarch64-none-linux-gnu")

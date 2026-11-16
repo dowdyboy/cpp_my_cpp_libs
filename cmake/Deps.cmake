@@ -103,6 +103,33 @@ function(_mylib_elf_arch file_path out_var)
     set(${out_var} "${_arch}" PARENT_SCOPE)
 endfunction()
 
+# 判断某个目录是不是"Linux/交叉编译的 OpenCV 安装树"（里面是 .so，不是 .lib）。
+# 目录可能是安装根、也可能是根下面 3 层的 lib/cmake/opencv4，所以往上找几级。
+function(_mylib_is_elf_opencv d out_var)
+    set(_hit 0)
+    foreach(_up "" "/.." "/../.." "/../../..")
+        if(EXISTS "${d}${_up}/lib/libopencv_core.so")
+            set(_hit 1)
+            break()
+        endif()
+    endforeach()
+    set(${out_var} ${_hit} PARENT_SCOPE)
+endfunction()
+
+# 目标架构（与 _mylib_elf_arch 的返回值同一套记号），供各依赖做架构校验。
+# 交叉编译时这一条是刚需：把 x64 的 .so/.lib 链进 ARM 产物，报错会非常难懂。
+if(MYLIB_ARCH STREQUAL "arm")
+    set(MYLIB_TARGET_ARCH "arm")
+elseif(MYLIB_ARCH STREQUAL "aarch64")
+    set(MYLIB_TARGET_ARCH "aarch64")
+elseif(MYLIB_ARCH STREQUAL "x86_64")
+    set(MYLIB_TARGET_ARCH "x86_64")
+elseif(MYLIB_ARCH STREQUAL "x86")
+    set(MYLIB_TARGET_ARCH "x86")
+else()
+    set(MYLIB_TARGET_ARCH "")
+endif()
+
 # ---------------------------------------------------------------- Eigen
 if(MYLIB_ENABLE_MATH)
     mylib_require_dep(eigen-5.0.0 "eigen-*.zip")
@@ -124,21 +151,27 @@ endif()
 if(MYLIB_ENABLE_LOG)
     mylib_require_dep(spdlog-1.17.0 "spdlog-*.zip")
     if(EXISTS "${MYLIB_DEP_spdlog-1.17.0}/CMakeLists.txt")
-        set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
-        set(SPDLOG_BUILD_EXAMPLE_HO OFF CACHE BOOL "" FORCE)
-        set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-        set(SPDLOG_BUILD_TESTS_HO OFF CACHE BOOL "" FORCE)
-        set(SPDLOG_BUILD_BENCH OFF CACHE BOOL "" FORCE)
-        set(SPDLOG_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-        set(SPDLOG_INSTALL OFF CACHE BOOL "" FORCE)
-        set(SPDLOG_FMT_EXTERNAL OFF CACHE BOOL "" FORCE)
-        set(SPDLOG_USE_STD_FORMAT OFF CACHE BOOL "" FORCE)
-        add_subdirectory("${MYLIB_DEP_spdlog-1.17.0}" "${CMAKE_BINARY_DIR}/_deps/spdlog" EXCLUDE_FROM_ALL)
+        # 嵌入到宿主工程时，宿主可能已经自己带了一份 spdlog。
+        # 那种情况下直接复用，再 add_subdirectory 一次会因为目标重名直接失败。
+        if(TARGET spdlog)
+            message(STATUS "[deps] spdlog: 复用宿主工程已有的 target（不再解压/编译）")
+        else()
+            set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
+            set(SPDLOG_BUILD_EXAMPLE_HO OFF CACHE BOOL "" FORCE)
+            set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+            set(SPDLOG_BUILD_TESTS_HO OFF CACHE BOOL "" FORCE)
+            set(SPDLOG_BUILD_BENCH OFF CACHE BOOL "" FORCE)
+            set(SPDLOG_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+            set(SPDLOG_INSTALL OFF CACHE BOOL "" FORCE)
+            set(SPDLOG_FMT_EXTERNAL OFF CACHE BOOL "" FORCE)
+            set(SPDLOG_USE_STD_FORMAT OFF CACHE BOOL "" FORCE)
+            add_subdirectory("${MYLIB_DEP_spdlog-1.17.0}" "${CMAKE_CURRENT_BINARY_DIR}/_deps/spdlog" EXCLUDE_FROM_ALL)
+            message(STATUS "[deps] spdlog: ${MYLIB_DEP_spdlog-1.17.0}")
+        endif()
         # spdlog::spdlog 本身是 ALIAS，不能再给它起别名，套一层 INTERFACE
         add_library(deps_spdlog INTERFACE)
         target_link_libraries(deps_spdlog INTERFACE spdlog::spdlog)
         add_library(deps::spdlog ALIAS deps_spdlog)
-        message(STATUS "[deps] spdlog: ${MYLIB_DEP_spdlog-1.17.0}")
     else()
         message(FATAL_ERROR "[deps] spdlog 源码缺失，请检查 resources/spdlog-*.zip")
     endif()
@@ -156,6 +189,86 @@ if(MYLIB_ENABLE_JSON)
         message(STATUS "[deps] nlohmann/json: ${MYLIB_DEP_nlohmann-json-3.12.0}")
     else()
         message(FATAL_ERROR "[deps] nlohmann/json 头文件缺失，请检查 resources/json-include*.zip")
+    endif()
+endif()
+
+# ---------------------------------------------------------------- pocketfft（信号处理）
+# 单头文件 FFT（BSD-3，NumPy/SciPy 同源）。没有 CMake、没有 .c，
+# 所以和 stb 一样：解压出目录，挂成 INTERFACE 目标。
+#
+# 为什么不用 FFTW：GPL；不用 kissfft：精度和"任意长度"支持不如 pocketfft；
+# 不用 CMSIS-DSP：偏 Cortex-M，NEON 加速对 A9 收益有限（见 docs/08）。
+if(MYLIB_ENABLE_DSP)
+    mylib_require_dep(pocketfft-4d865cb "pocketfft-*.zip"
+        DESTINATION "${MYLIB_DEPS_DIR}/pocketfft-4d865cb")
+    if(EXISTS "${MYLIB_DEP_pocketfft-4d865cb}/pocketfft_hdronly.h")
+        add_library(deps_pocketfft INTERFACE)
+        add_library(deps::pocketfft ALIAS deps_pocketfft)
+        target_include_directories(deps_pocketfft INTERFACE "${MYLIB_DEP_pocketfft-4d865cb}")
+        # pocketfft 默认用异常报错。本库的约定是"公共 API 不抛异常"，
+        # 所以统一让它走 abort（和 Result::value() 违反前置条件时的策略一致）；
+        # 输入合法性由 my::dsp 层先校验，正常路径不会碰到这个分支。
+        # 顺带一个好处：DSP 组件也能在 -fno-exceptions 下编。
+        target_compile_definitions(deps_pocketfft INTERFACE
+            POCKETFFT_NO_MULTITHREADING
+            POCKETFFT_NO_EXCEPTIONS)
+        message(STATUS "[deps] pocketfft: ${MYLIB_DEP_pocketfft-4d865cb}")
+    else()
+        message(FATAL_ERROR
+            "[deps] pocketfft 头文件缺失。请检查 resources/pocketfft-*.zip，"
+            "或跑一次 scripts/fetch-deps.ps1（Linux: scripts/fetch-deps.sh）")
+    endif()
+endif()
+
+# ---------------------------------------------------------------- cpp-httplib（HTTP）
+# 单头文件 HTTP 客户端 + 服务端（MIT）。项目里只会在 src/http/http.cpp 这一个 TU
+# 里 include 它，公共头不暴露（和 stb / pocketfft 同一个套路）。
+if(MYLIB_ENABLE_HTTP)
+    mylib_require_dep(httplib-0.66.0 "httplib-*.zip"
+        DESTINATION "${MYLIB_DEPS_DIR}/httplib-0.66.0")
+    if(EXISTS "${MYLIB_DEP_httplib-0.66.0}/httplib.h")
+        add_library(deps_httplib INTERFACE)
+        add_library(deps::httplib ALIAS deps_httplib)
+        target_include_directories(deps_httplib INTERFACE "${MYLIB_DEP_httplib-0.66.0}")
+        if(WIN32)
+            # httplib 要求 Win10+（否则直接 #error），并依赖 winsock
+            target_compile_definitions(deps_httplib INTERFACE _WIN32_WINNT=0x0A00 NOMINMAX WIN32_LEAN_AND_MEAN)
+            target_link_libraries(deps_httplib INTERFACE ws2_32)
+        endif()
+        # 服务端线程池：板端（2 核）要设成 2；默认给桌面用的 4
+        if(NOT DEFINED MYLIB_HTTP_THREAD_POOL)
+            set(MYLIB_HTTP_THREAD_POOL "4" CACHE STRING "HTTP 服务端线程池大小（板端建议 2）")
+        endif()
+        target_compile_definitions(deps_httplib INTERFACE
+            CPPHTTPLIB_THREAD_POOL_COUNT=${MYLIB_HTTP_THREAD_POOL})
+        message(STATUS "[deps] cpp-httplib: ${MYLIB_DEP_httplib-0.66.0}（线程池 ${MYLIB_HTTP_THREAD_POOL}）")
+    else()
+        message(FATAL_ERROR
+            "[deps] httplib.h 缺失。请检查 resources/httplib-*.zip，"
+            "或跑一次 scripts/fetch-deps.ps1（Linux: scripts/fetch-deps.sh）")
+    endif()
+endif()
+
+# ---------------------------------------------------------------- stb_image
+# 图像组件的解码/编码底座。**只有两个 .h**（stb 是单头文件库），
+# 所以不走 add_subdirectory —— 没有 CMake、没有 .c、也没什么可配置的。
+#
+# 为什么不用 OpenCV 代替：板端（Zynq armv7）没有 OpenCV，而相机链路
+# 只缺"解码 + resize"这两件事，为了它们把整个 OpenCV 交叉编译上板不值得。
+# 选型与实测见 docs/07-图像链路与无异常构建.md。
+if(MYLIB_ENABLE_IMAGE)
+    # 压缩包里没有顶层目录（直接是 stb_image.h），所以显式指定 DESTINATION
+    mylib_require_dep(stb-image-2.32 "stb-image-*.zip"
+        DESTINATION "${MYLIB_DEPS_DIR}/stb-image-2.32")
+    if(EXISTS "${MYLIB_DEP_stb-image-2.32}/stb_image.h")
+        add_library(deps_stb INTERFACE)
+        add_library(deps::stb ALIAS deps_stb)
+        target_include_directories(deps_stb INTERFACE "${MYLIB_DEP_stb-image-2.32}")
+        message(STATUS "[deps] stb_image: ${MYLIB_DEP_stb-image-2.32}")
+    else()
+        message(FATAL_ERROR
+            "[deps] stb_image 头文件缺失。请检查 resources/stb-image-*.zip，"
+            "或跑一次 scripts/fetch-deps.ps1（Linux: scripts/fetch-deps.sh）")
     endif()
 endif()
 
@@ -367,6 +480,13 @@ if(MYLIB_ENABLE_NCNN)
         if(WIN32)
             # ncnn 在 Windows 上依赖 winsock 与系统库
             target_link_libraries(deps_ncnn INTERFACE ws2_32)
+        else()
+            # ncnn 的 ThreadLocalStorage 用 pthread_key_*；静态链接时必须显式带上，
+            # 否则只有直接链 deps::ncnn（比如原生 API 示例）的 target 会
+            # "undefined reference to pthread_key_create"。
+            # 顺带把 dl 带上：ncnn 的部分后端会 dlopen。
+            find_package(Threads REQUIRED)
+            target_link_libraries(deps_ncnn INTERFACE Threads::Threads ${CMAKE_DL_LIBS})
         endif()
         message(STATUS "[deps] ncnn: ${_ncnn_root}")
     else()
@@ -379,68 +499,201 @@ if(MYLIB_ENABLE_NCNN)
     endif()
 endif()
 # ---------------------------------------------------------------- OpenCV（图像组件）
-# 找法：MYLIB_OPENCV_ROOT -> third_party/opencv-*/opencv/build -> 系统 find_package
+# 两条获取路径，按平台分开：
+#
+#   Windows：官方预编译包（MSVC ABI，opencv_worldXXX.lib），走 find_package(CONFIG)。
+#   Linux / 交叉编译：自己编出来的安装树（$prefix/{include/opencv4, lib/libopencv_*.so}），
+#                     **直接按模块链接，不走 find_package** —— 交叉编译时
+#                     find_package 很容易捞到宿主的 OpenCV，然后链出一堆
+#                     "架构不匹配/skip incompatible" 的怪错误。
+#
+# 交叉编译的产物由 scripts/build-opencv-armv7-petalinux2020.sh 生成，
+# 放到 third_party/opencv-<版本>-armv7/ 即可被自动发现。
 if(MYLIB_ENABLE_CV)
-    # 官方 Windows 包的目录结构：
-    #   opencv/build/                     <- 有 OpenCVConfig.cmake，但缺 OpenCVModules.cmake
-    #   opencv/build/x64/vc16/lib/        <- 两者都有，这才是能用的 OpenCV_DIR
-    # 所以优先挑"两个文件都在"的目录。
-    if(NOT MYLIB_OPENCV_ROOT)
-        file(GLOB _ocv_candidates
-            "${MYLIB_DEPS_DIR}/opencv-*/opencv/build/*/vc*/lib"
-            "${MYLIB_DEPS_DIR}/opencv-*/build/*/vc*/lib"
-            "${MYLIB_DEPS_DIR}/opencv-*/opencv/build"
-            "${MYLIB_DEPS_DIR}/opencv-*"
-            "${MYLIB_DEPS_DIR}/opencv-*/lib/cmake/opencv4")
-        foreach(_d ${_ocv_candidates})
-            if(EXISTS "${_d}/OpenCVConfig.cmake" AND EXISTS "${_d}/OpenCVModules.cmake")
-                set(MYLIB_OPENCV_ROOT "${_d}")
-                break()
-            endif()
-        endforeach()
+    set(MYLIB_HAVE_CV OFF)
+
+    if(WIN32)
+        # 官方 Windows 包的目录结构：
+        #   opencv/build/                     <- 有 OpenCVConfig.cmake，但缺 OpenCVModules.cmake
+        #   opencv/build/x64/vc16/lib/        <- 两者都有，这才是能用的 OpenCV_DIR
+        # 所以优先挑"两个文件都在"的目录。
         if(NOT MYLIB_OPENCV_ROOT)
+            file(GLOB _ocv_candidates
+                "${MYLIB_DEPS_DIR}/opencv-*/opencv/build/*/vc*/lib"
+                "${MYLIB_DEPS_DIR}/opencv-*/build/*/vc*/lib"
+                "${MYLIB_DEPS_DIR}/opencv-*/opencv/build"
+                "${MYLIB_DEPS_DIR}/opencv-*"
+                "${MYLIB_DEPS_DIR}/opencv-*/lib/cmake/opencv4")
+            # 过滤掉 Linux/交叉编译的安装树：目录里有 libopencv_core.so 就说明是
+            # ELF 产物，在 Windows 上 find_package 会报
+            # "IMPORTED_IMPLIB not set"，把整个 configure 拖死。
+            # 板端的 OpenCV 放在 third_party/opencv-*-armv7/ 是很正常的事。
+            set(_ocv_win_candidates "")
             foreach(_d ${_ocv_candidates})
-                if(EXISTS "${_d}/OpenCVConfig.cmake")
+                _mylib_is_elf_opencv("${_d}" _is_elf)
+                if(_is_elf)
+                    continue()
+                endif()
+                list(APPEND _ocv_win_candidates "${_d}")
+            endforeach()
+            set(_ocv_candidates ${_ocv_win_candidates})
+            foreach(_d ${_ocv_candidates})
+                if(EXISTS "${_d}/OpenCVConfig.cmake" AND EXISTS "${_d}/OpenCVModules.cmake")
                     set(MYLIB_OPENCV_ROOT "${_d}")
                     break()
                 endif()
             endforeach()
-        endif()
-    endif()
-
-    set(MYLIB_HAVE_CV OFF)
-    # 官方包的 OpenCVConfig.cmake 依赖同目录的 OpenCVModules.cmake，
-    # 且必须通过 OpenCV_DIR 走 config 模式搜索才靠得住（用 PATHS+NO_DEFAULT_PATH 会失败）。
-    if(MYLIB_OPENCV_ROOT)
-        set(OpenCV_DIR "${MYLIB_OPENCV_ROOT}")
-    endif()
-    find_package(OpenCV QUIET CONFIG)
-
-    if(OpenCV_FOUND)
-        set(MYLIB_HAVE_CV ON)
-        add_library(deps_opencv INTERFACE)
-        add_library(deps::opencv ALIAS deps_opencv)
-        target_include_directories(deps_opencv INTERFACE ${OpenCV_INCLUDE_DIRS})
-        target_link_libraries(deps_opencv INTERFACE ${OpenCV_LIBS})
-
-        # Windows 上要把 opencv_worldXXX.dll 拷到可执行文件旁边
-        if(WIN32 AND OpenCV_DIR)
-            get_filename_component(_ocv_parent "${OpenCV_DIR}" DIRECTORY)
-            if(EXISTS "${_ocv_parent}/bin")
-                set(MYLIB_OPENCV_BIN_DIR "${_ocv_parent}/bin" CACHE PATH "OpenCV 运行时 DLL 目录" FORCE)
-                # 只拷 release 版：opencv_world4120.dll（debug 版是 opencv_world4120d.dll）
-                file(GLOB _ocv_all_dlls "${_ocv_parent}/bin/opencv_world[0-9]*.dll")
-                foreach(_dll ${_ocv_all_dlls})
-                    if(NOT _dll MATCHES "d\\.dll$")
-                        list(APPEND MYLIB_OPENCV_RUNTIME_DLLS "${_dll}")
+            if(NOT MYLIB_OPENCV_ROOT)
+                foreach(_d ${_ocv_candidates})
+                    if(EXISTS "${_d}/OpenCVConfig.cmake")
+                        set(MYLIB_OPENCV_ROOT "${_d}")
+                        break()
                     endif()
                 endforeach()
             endif()
         endif()
 
-        message(STATUS "[deps] OpenCV: ${OpenCV_VERSION} (${OpenCV_DIR})")
+        # 官方包的 OpenCVConfig.cmake 依赖同目录的 OpenCVModules.cmake，
+        # 且必须通过 OpenCV_DIR 走 config 模式搜索才靠得住（用 PATHS+NO_DEFAULT_PATH 会失败）。
+        if(MYLIB_OPENCV_ROOT)
+            set(OpenCV_DIR "${MYLIB_OPENCV_ROOT}")
+        endif()
+        find_package(OpenCV QUIET CONFIG)
+
+        if(OpenCV_FOUND)
+            set(MYLIB_HAVE_CV ON)
+            add_library(deps_opencv INTERFACE)
+            add_library(deps::opencv ALIAS deps_opencv)
+            target_include_directories(deps_opencv INTERFACE ${OpenCV_INCLUDE_DIRS})
+            target_link_libraries(deps_opencv INTERFACE ${OpenCV_LIBS})
+
+            # Windows 上要把 opencv_worldXXX.dll 拷到可执行文件旁边
+            if(OpenCV_DIR)
+                get_filename_component(_ocv_parent "${OpenCV_DIR}" DIRECTORY)
+                if(EXISTS "${_ocv_parent}/bin")
+                    set(MYLIB_OPENCV_BIN_DIR "${_ocv_parent}/bin" CACHE PATH "OpenCV 运行时 DLL 目录" FORCE)
+                    # 只拷 release 版：opencv_world4120.dll（debug 版是 opencv_world4120d.dll）
+                    file(GLOB _ocv_all_dlls "${_ocv_parent}/bin/opencv_world[0-9]*.dll")
+                    foreach(_dll ${_ocv_all_dlls})
+                        if(NOT _dll MATCHES "d\\.dll$")
+                            list(APPEND MYLIB_OPENCV_RUNTIME_DLLS "${_dll}")
+                        endif()
+                    endforeach()
+                endif()
+            endif()
+
+            message(STATUS "[deps] OpenCV: ${OpenCV_VERSION} (${OpenCV_DIR})")
+        else()
+            message(STATUS "[deps] 未找到 OpenCV —— 跳过 cv 组件（用 -DMYLIB_OPENCV_ROOT=... 指定）")
+            set(MYLIB_ENABLE_CV OFF)
+        endif()
     else()
-        message(STATUS "[deps] 未找到 OpenCV —— 跳过 cv 组件（用 -DMYLIB_OPENCV_ROOT=... 指定）")
-        set(MYLIB_ENABLE_CV OFF)
+        # ---- Linux / 交叉编译：按目录 + ELF 架构挑 ----
+        set(_ocv_candidates "")
+        if(MYLIB_OPENCV_ROOT)
+            list(APPEND _ocv_candidates "${MYLIB_OPENCV_ROOT}")
+        endif()
+        file(GLOB _ocv_dirs "${MYLIB_DEPS_DIR}/opencv-*")
+        list(SORT _ocv_dirs)
+        list(APPEND _ocv_candidates ${_ocv_dirs})
+
+        set(_ocv_root "")
+        set(_ocv_rejected "")
+        foreach(_c ${_ocv_candidates})
+            set(_core "")
+            if(EXISTS "${_c}/lib/libopencv_core.so")
+                set(_core "${_c}/lib/libopencv_core.so")
+            elseif(EXISTS "${_c}/lib/libopencv_core.a")
+                set(_core "${_c}/lib/libopencv_core.a")
+            endif()
+            if(NOT _core)
+                if(EXISTS "${_c}/OpenCVConfig.cmake")
+                    # 宿主上 apt 装的 OpenCV：架构天然对，交给 find_package
+                    set(_ocv_root "${_c}")
+                    set(_ocv_from_config ON)
+                    break()
+                endif()
+                continue()
+            endif()
+            if(MYLIB_TARGET_ARCH)
+                _mylib_elf_arch("${_core}" _a)
+                if(NOT _a STREQUAL "${MYLIB_TARGET_ARCH}")
+                    list(APPEND _ocv_rejected "${_c} (${_a} != ${MYLIB_TARGET_ARCH})")
+                    continue()
+                endif()
+            endif()
+            set(_ocv_root "${_c}")
+            break()
+        endforeach()
+
+        if(_ocv_root AND _ocv_from_config)
+            set(OpenCV_DIR "${_ocv_root}")
+            find_package(OpenCV QUIET CONFIG)
+            if(OpenCV_FOUND)
+                set(MYLIB_HAVE_CV ON)
+                if(OpenCV_INCLUDE_DIRS)
+                    list(GET OpenCV_INCLUDE_DIRS 0 _ocv_first_inc)
+                    set(MYLIB_OPENCV_INCLUDE_DIR "${_ocv_first_inc}")
+                endif()
+                add_library(deps_opencv INTERFACE)
+                add_library(deps::opencv ALIAS deps_opencv)
+                target_include_directories(deps_opencv INTERFACE ${OpenCV_INCLUDE_DIRS})
+                target_link_libraries(deps_opencv INTERFACE ${OpenCV_LIBS})
+                message(STATUS "[deps] OpenCV: ${OpenCV_VERSION} (${OpenCV_DIR})")
+            endif()
+        elseif(_ocv_root)
+            set(_ocv_inc "${_ocv_root}/include/opencv4")
+            if(NOT EXISTS "${_ocv_inc}/opencv2/core.hpp")
+                set(_ocv_inc "${_ocv_root}/include")
+            endif()
+
+            set(_ocv_libs "")
+            foreach(_m core imgproc imgcodecs)
+                if(EXISTS "${_ocv_root}/lib/libopencv_${_m}.so")
+                    list(APPEND _ocv_libs "${_ocv_root}/lib/libopencv_${_m}.so")
+                elseif(EXISTS "${_ocv_root}/lib/libopencv_${_m}.a")
+                    list(APPEND _ocv_libs "${_ocv_root}/lib/libopencv_${_m}.a")
+                endif()
+            endforeach()
+
+            if(_ocv_libs AND EXISTS "${_ocv_inc}/opencv2/core.hpp")
+                set(MYLIB_HAVE_CV ON)
+                # 供 install(SDK) 使用：把解析出来的头目录和库目录暴露出去
+                set(MYLIB_OPENCV_INCLUDE_DIR "${_ocv_inc}")
+                set(MYLIB_OPENCV_LIB_DIR "${_ocv_root}/lib")
+                add_library(deps_opencv INTERFACE)
+                add_library(deps::opencv ALIAS deps_opencv)
+                target_include_directories(deps_opencv INTERFACE "${_ocv_inc}")
+                target_link_libraries(deps_opencv INTERFACE ${_ocv_libs})
+                # 动态库：跑测试/程序时得能找到，给个 build rpath（板端仍然建议 LD_LIBRARY_PATH）
+                set_target_properties(deps_opencv PROPERTIES
+                    INTERFACE_LINK_OPTIONS "-Wl,-rpath,${_ocv_root}/lib")
+                set(OpenCV_VERSION "")
+                if(EXISTS "${_ocv_inc}/opencv2/core/version.hpp")
+                    file(READ "${_ocv_inc}/opencv2/core/version.hpp" _ver LIMIT 2048)
+                    string(REGEX MATCH "CV_VERSION_MAJOR[ \t]+([0-9]+)" _ "${_ver}")
+                    set(_vmaj "${CMAKE_MATCH_1}")
+                    string(REGEX MATCH "CV_VERSION_MINOR[ \t]+([0-9]+)" _ "${_ver}")
+                    set(_vmin "${CMAKE_MATCH_1}")
+                    string(REGEX MATCH "CV_VERSION_REVISION[ \t]+([0-9]+)" _ "${_ver}")
+                    set(_vrev "${CMAKE_MATCH_1}")
+                    set(OpenCV_VERSION "${_vmaj}.${_vmin}.${_vrev}")
+                endif()
+                message(STATUS "[deps] OpenCV: ${OpenCV_VERSION} (${_ocv_root}, 架构 ${MYLIB_TARGET_ARCH})")
+            else()
+                message(STATUS "[deps] ${_ocv_root} 里缺 core/imgproc/imgcodecs 或头文件 —— 跳过 cv 组件")
+                set(MYLIB_ENABLE_CV OFF)
+            endif()
+        else()
+            if(_ocv_rejected)
+                string(REPLACE ";" "\n    " _rej "${_ocv_rejected}")
+                message(STATUS "[deps] 找到 OpenCV 但架构不匹配：\n    ${_rej}\n"
+                               "      目标: ${MYLIB_TARGET_ARCH} —— 跳过 cv 组件")
+            else()
+                message(STATUS "[deps] 未找到 OpenCV —— 跳过 cv 组件。"
+                               "板端请先跑 scripts/build-opencv-armv7-petalinux2020.sh")
+            endif()
+            set(MYLIB_ENABLE_CV OFF)
+        endif()
     endif()
 endif()

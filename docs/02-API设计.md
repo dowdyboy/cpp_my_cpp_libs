@@ -458,7 +458,231 @@ auto out = session->run_single_f32(prep.value().tensor, prep.value().shape);
 
 ---
 
-## 7. 如何接入一个新三方库（五步）
+## 7. image —— 图像（板端，不需要 OpenCV）
+
+```cpp
+#include <my_cpp_libs/image/image.hpp>
+```
+
+> 依赖只有 `core + preprocess + stb`（两个 `.h`），**任何平台都能编**，
+> 包括没有 OpenCV 的 Zynq。选型与实测见 [07-图像链路与无异常构建](07-图像链路与无异常构建.md)。
+
+### 定位：补上"板端解码"这一段
+
+`my::cv` 绑死 OpenCV，armv7 上编不出来，于是相机链路在板上第一步就断。
+`my::image` 只做三件事：解码/编码（stb）、缩放、预处理成张量。
+
+```cpp
+auto img = my::image::load("frame.png", /*channels=*/3);   // 也可以是 load_memory()
+if (!img) { my::log::error("{}", img.status().to_string()); return; }
+
+my::image::PreprocessSpec spec;
+spec.input_width  = 640;
+spec.input_height = 640;
+spec.keep_aspect  = true;              // letterbox
+spec.norm.scale   = 1.0f / 255.0f;
+spec.norm.mean    = {0.485f, 0.456f, 0.406f};
+spec.norm.stddev  = {0.229f, 0.224f, 0.225f};
+
+auto prep = my::image::prepare(img.value(), spec);
+auto out  = session->run_single_f32(prep.value().tensor, prep.value().shape);
+```
+
+| API | 说明 |
+|---|---|
+| `load / load_memory` | 8 bit；`channels` = 0/1/3/4，0 表示保持原样 |
+| `save` | 按扩展名选格式（png/jpg/jpeg/bmp/tga），JPEG 带 quality |
+| `resize / resize_nearest` | 双线性 / 最近邻；标签图必须用最近邻 |
+| `prepare / prepare_file` | 通道转换 → 缩放 → letterbox → 归一化 → NCHW/NHWC |
+| `unletterbox_boxes` | 批量把框映射回原图 |
+| `Image` | HWC u8 连续内存；`empty()/pixel_count()/byte_size()/to_string()` |
+
+### 三条必须知道的约定
+
+1. **`src_order` 默认是 RGB**（和 `my::infer::NormalizeSpec` 的 BGR 默认值不同）。
+   stb 解出来就是 RGB，这个默认值是为了堵"照抄 cv 的默认值导致 R/B 静默互换"。
+2. **`dst_channels = 1` 才是灰度模型**。0 表示跟随输入；4 通道输入会丢 alpha 变 3 通道。
+3. **`letterbox.scale_x/scale_y` 是取整后的实际比例**，所以逆变换是精确的；
+   `cv::prepare` 用的是理想比例，两者差在亚像素级。
+
+### 与 cv 的对照
+
+| 需求 | OpenCV（`my::cv`） | 板端（`my::image`） |
+|---|---|---|
+| 读一张 jpg/png | `cv::imread` + 错误翻译 | `load()`（stb） |
+| 存图 | `cv::imwrite` | `save()` |
+| RGB/BGR 转换 | `cvtColor` | `prepare()` 里的 `src_order/dst_order` |
+| 缩放 | `cv::resize`（SIMD） | `resize()`（标量双线性） |
+| letterbox + 归一化 | `prepare()` | `prepare()` |
+| 4 通道输入 | 按 `norm.src_order` 区分 BGRA/RGBA | 同左，且丢 alpha |
+| 灰度模型 | `input_channels = 1` | `dst_channels = 1` |
+
+---
+
+## 8. dsp —— 信号处理（频谱/检测/识别/解调）
+
+```cpp
+#include <my_cpp_libs/dsp/dsp.hpp>
+```
+
+> 只依赖 pocketfft（单头文件），板端可编；可进 `-fno-exceptions` 子集。
+> 判决树、阈值依据、解调实现细节见 [08-信号处理与解调](08-信号处理与解调.md)。
+
+### 一条链路
+
+```cpp
+my::dsp::Samples x = read_adc();                  // float 数组，采样率自己给
+
+auto spec = my::dsp::welch(x, 8000.0, 1024);      // PSD + 噪声底 + 峰
+auto peaks = my::dsp::find_peaks(spec.value(), 8.0f, 100.0);
+
+auto bursts = my::dsp::detect_bursts(x, 128, 10.0f);
+for (const auto& b : bursts) {
+    my::dsp::Samples seg(x.begin() + b.begin, x.begin() + b.end);
+    auto f = my::dsp::analyze(seg, 8000.0);       // 10 个可解释特征
+    auto c = my::dsp::classify(f.value());        // CW/AM/ASK/FM/FSK/PSK/噪声
+    my::log::info("{} @ {:.0f} Hz", my::dsp::modulation_name(c.modulation), f.value().center_freq_hz);
+}
+```
+
+| 分组 | 接口 |
+|---|---|
+| 变换 | `make_window` / `fft` / `ifft` |
+| 频谱 | `welch` / `find_peaks` / `estimate_snr_db` |
+| 滤波 | `fir_lowpass` / `fir_highpass` / `fir_bandpass` / `fir_apply` / `biquad_design` / `biquad_apply` |
+| 混频抽取 | `mix_down`（实/复重载）/ `decimate` |
+| 检测 | `detect_bursts`（边界已细化到 ±8 样本） |
+| 识别 | `analyze` / `classify` / `modulation_name` |
+| 解调 | `demod_am` / `demod_fm` / `demod_ask` / `demod_fsk` / `demod_bpsk` / `slice_bits` |
+
+### 三条约定
+
+1. **采样率显式传入**，不做全局状态；所有频率参数都是 Hz。
+2. `classify()` 是**规则树**，输出带 `confidence`（边界裕量，不是概率）；
+   特征在 `Features` 里全给了，想自己写判决直接用。
+3. 解调输入是**实采样**（AM/FM/ASK/FSK）或**复基带**（BPSK）；
+   RF 采样要先 `mix_down` 到基带附近。
+
+---
+
+## 9. ml —— 机器学习模型（sklearn → ONNX）
+
+```cpp
+#include <my_cpp_libs/ml/ml.hpp>
+```
+
+> 训练在 Python 侧做（`tools/sklearn_export.py`），C++ 侧只负责"给一行特征、返回类别"。
+> 底层走 `my::infer` 的 ONNX Runtime 后端，**不引入新的 C++ 三方库**。
+> 导出链路、覆盖面和限制见 [09-机器学习模型集成](09-机器学习模型集成.md)。
+
+### 用法
+
+```cpp
+auto model = my::ml::Model::load("models/ml/iris_logreg.onnx");  // 自动找同名 .json
+if (!model) { my::log::error("{}", model.status().to_string()); return; }
+
+const auto& m = model.value().meta();
+m.n_features;   // 4
+m.features;     // ["sepal_length", "sepal_width", "petal_length", "petal_width"]
+m.classes;      // ["setosa", "versicolor", "virginica"]
+
+auto p = model.value().predict_one({5.1f, 3.5f, 1.4f, 0.2f});
+// p.label = 0, p.label_name = "setosa", p.scores = {0.9816, 0.0184, 0.0000}
+
+std::vector<float> batch = {/* 样本1…, 样本2… */};   // 长度 = n_samples * n_features
+auto preds = model.value().predict(batch);            // 一次 run 出多行
+```
+
+### 与 `my::infer` 的分工
+
+| 需求 | `my::infer` | `my::ml` |
+|---|---|---|
+| 图像/张量模型（CNN） | ✅ | ❌ |
+| sklearn 表格模型（双输出 label+prob） | 要自己拆两个输出、自己转 i64 | ✅ `Prediction` 直接给 |
+| 特征数校验 | 无 | ✅ 不匹配返回 `InvalidArgument` |
+| 类别名 | 无 | ✅ sidecar 驱动 |
+| 特征顺序 | 无 | ✅ `meta().features` |
+
+### 三条约定
+
+1. **不可拷贝、不可并发**：`Model` 持有 `infer::Session`，和它同一个线程安全契约；
+2. **没有 ORT 的构建上 `load()` 返回 `Unsupported`**：ml 依赖 infer 的 ORT 后端，
+   MinGW/精简板端会走这条分支，单元测试自动跳过；
+3. **sidecar 与模型必须匹配**：`n_features`/端口名对不上会返回 `ParseError`，
+   不会"跑出垃圾结果"。
+
+---
+
+## 10. net / http —— 网络
+
+```cpp
+#include <my_cpp_libs/net/net.hpp>    // TCP/UDP，无三方依赖
+#include <my_cpp_libs/http/http.hpp>   // HTTP 客户端+服务端（封装 cpp-httplib）
+```
+
+> 为什么 TCP/UDP 自己封、HTTP 引库，以及板端注意事项见
+> [10-网络与HTTP](10-网络与HTTP.md)。这里只列 API 上的约定。
+
+### net：TCP / UDP
+
+```cpp
+// 服务端
+auto lis = my::net::TcpListener::bind({"0.0.0.0", 9000}, 8);
+auto conn = lis.value().accept(1000);          // 超时 -> Errc::Timeout
+conn.value().send_all("ok", 2);                // 处理部分写
+auto n = conn.value().recv(buf, sizeof(buf));  // n == 0 表示对端关闭
+
+// 客户端 + 分帧
+auto cli = my::net::TcpSocket::connect({"192.168.1.50", 9000}, 2000);
+my::net::write_frame(cli.value(), R"({"cmd":"start"})");
+auto payload = my::net::read_frame(cli.value(), 64 * 1024);
+
+// UDP
+auto rx = my::net::UdpSocket::bind({"0.0.0.0", 9001});
+rx.value().join_multicast("239.255.0.1");
+auto d = rx.value().recv_from();
+```
+
+| 约定 | 说明 |
+|---|---|
+| 返回值 | 一律 `Status` / `Result`，消息里带 errno/WSA 码 |
+| `recv()` 返回 0 | **对端正常关闭**（POSIX 语义），不是错误 |
+| 超时 | `set_timeout(ms)`；`accept(timeout_ms)` / `connect(..., timeout_ms)` |
+| SIGPIPE | Linux 上写已关闭连接不会杀进程（内部 `MSG_NOSIGNAL`） |
+| 线程 | 一个 socket 允许"一读一写"两线程，不要两个线程同时 recv |
+| 分帧 | `write_frame/read_frame`（4 字节大端长度）与 `read_line` |
+
+### http：客户端 + 服务端
+
+```cpp
+// 客户端（打到上位机 Flask）
+my::http::ClientOptions opt; opt.base_url = "http://192.168.1.50:5000";
+auto cli = my::http::Client::create(opt);
+auto r = cli.value().post_json("/api/upload", telemetry);
+
+// 服务端（板端 REST）
+my::http::ServerOptions sopt; sopt.host = "0.0.0.0"; sopt.port = 8080;
+auto srv = my::http::Server::create(sopt);
+srv.value().get("/status", [](const my::http::Request&, my::http::Response& res) {
+    my::json::Document d; d.set("ok", true); res.set_json(d);
+});
+srv.value().listen();
+```
+
+| 约定 | 说明 |
+|---|---|
+| 状态码 | 4xx/5xx **不是** `Status` 失败；网络层成功就返回 `Response` |
+| 路由 | 支持 GET/POST/PUT/PATCH/DELETE/OPTIONS；其它方法 `route()` 返回 `Unsupported` |
+| 参数 | `req.query_param("a")` 取 URL 查询参数（已解码）；`req.param("id")` 取 `/x/:id` 路径参数 |
+| 例外 | `get_json()` 把非 2xx 转成 `RuntimeError`（消息带状态码 + body 前 200 字节） |
+| 错误体 | `set_error(code, msg)` → `{"error": "...", "status": code}` |
+| 隔离 | 公共头没有 httplib 类型（pimpl），和 infer 隔离 `Ort::*` 一样 |
+| 线程 | `Client` 非线程安全（一线程一实例）；`Server` 内部线程池 |
+| TLS | 未启用；`https://` 返回 `Unsupported` |
+
+---
+
+## 11. 如何接入一个新三方库（五步）
 
 以加一个 "yaml" 组件为例：
 
@@ -493,7 +717,7 @@ endif()
 
 ---
 
-## 8. 常见陷阱清单
+## 12. 常见陷阱清单
 
 | 陷阱 | 后果 | 规避 |
 |---|---|---|
@@ -505,3 +729,13 @@ endif()
 | 让 `Result<T>::value()` 在失败时返回值 | 掩盖 bug | 已设计成 `abort()` |
 | 用 `int` 当错误码跨模块传 | 无法携带上下文 | 统一用 `Status` |
 | 在公共头里出现 `Ort::` 类型 | 无 ORT 的平台编不过 | 接口隔离，`Session` 是纯虚类 |
+| 把 stb/相机给的 RGB 当 BGR 喂进 `image_to_tensor` | 图看着正常，模型结果全错 | `my::image` 的默认 `src_order` 已经是 RGB；用 `cv::Mat` 时才需要 BGR |
+| 给灰度模型走 `my::cv` 却不设 `input_channels` | 3 通道数据喂 1 通道模型，维度对不上或结果错 | `spec.input_channels = 1`（cv）/ `spec.dst_channels = 1`（image） |
+| 用 `stb` 解出来的图做大幅缩略图 | 双线性点采样没有面积平均，混叠明显 | 大倍下采样换 `stbir_resize_uint8_srgb`，见 [07 §3.3](07-图像链路与无异常构建.md) |
+| 以为 `-fno-exceptions` 整库都支持 | 开了 json/infer 就编不过 | 只有 core + math + dsp + net 支持；CMake 会在 configure 阶段拦下（[07 §5](07-图像链路与无异常构建.md)） |
+| sklearn 导出忘了 `zipmap=False` | 分类器输出变成 `seq<map>`，C++ 的 Tensor 吃不了 | `tools/sklearn_export.py` 已固定关闭；直接用 skl2onnx 时自己加 |
+| 特征顺序和训练时不一致 | 不报错，只是结果全错 | 用 sidecar 的 `features` 对齐；`my::ml` 只校验**数量**，顺序要靠元数据 |
+| ONNX opset 导高了 | 板端 ORT 1.18.1 加载失败 | 导出固定 `target_opset=18` |
+| Linux 上往已关闭的 TCP 连接写 | 默认 SIGPIPE **杀掉整个进程** | `my::net` 内部用 `MSG_NOSIGNAL`；自己写 socket 时别忘 |
+| httplib 在 Windows 上要求 Win10+ | 缺 `_WIN32_WINNT` 会 `#error` | `deps::httplib` 已经统一加了 `_WIN32_WINNT=0x0A00` |
+| HTTP 服务端线程池默认 8+ | 双核板子上白占内存/线程 | 用 `-DMYLIB_HTTP_THREAD_POOL=2` |

@@ -162,7 +162,7 @@ MYLIB_API void register_backend(std::string name, SessionFactory factory);
 /// 已注册的后端名
 MYLIB_API std::vector<std::string> available_backends();
 
-MYLIB_API bool has_backend(std::string_view name) noexcept;
+MYLIB_API bool has_backend(std::string_view name);
 
 /// 创建会话。Options::backend 为空时按优先级挑选：
 ///   onnxruntime -> ncnn -> stub

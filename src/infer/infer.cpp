@@ -97,6 +97,13 @@ Status Session::run_single(const Tensor& input, Tensor& output) {
 
 Result<std::vector<float>> Session::run_single_f32(const std::vector<float>& input,
                                                    const Shape&                input_shape) {
+    if (input.empty()) return Status(Errc::InvalidArgument, "输入为空");
+    if (input_shape.elements() != static_cast<std::int64_t>(input.size())) {
+        return Status(Errc::InvalidArgument,
+                      "输入形状与数据长度不匹配: shape=" + input_shape.to_string() +
+                          ", size=" + std::to_string(input.size()));
+    }
+
     Tensor in;
     in.type  = DType::Float32;
     in.shape = input_shape;
@@ -113,6 +120,7 @@ Result<std::vector<float>> Session::run_single_f32(const std::vector<float>& inp
     }
     const std::size_t n = out.byte_size() / sizeof(float);
     const float*      p = static_cast<const float*>(out.data);
+    if (n == 0 || p == nullptr) return std::vector<float>{};
     return std::vector<float>(p, p + n);
 }
 
@@ -255,7 +263,7 @@ std::vector<std::string> available_backends() {
     return r.order;
 }
 
-bool has_backend(std::string_view name) noexcept {
+bool has_backend(std::string_view name) {
     if (name.empty()) return false;
     ensure_builtin_backends();
     Registry& r = registry();

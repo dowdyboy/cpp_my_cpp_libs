@@ -3,7 +3,7 @@
 # 用法: bash scripts/convert_all_models.sh [models 目录]
 set -uo pipefail
 
-MODELS="${1:-/mnt/d/syncworkspace/cpp_my_cpp_libs/models}"
+MODELS="${1:-$(cd "$(dirname "$0")/.." && pwd)/models}"
 OUT="$MODELS/ncnn"
 TOOL=/opt/ncnn-tools/ncnn-build/tools/onnx/onnx2ncnn
 

@@ -6,7 +6,8 @@
 用同一份 CMake 配置完成编译，业务代码不需要写平台分支。
 
 ```
-业务代码  ->  my_cpp_libs::{log, json, math, infer}  ->  spdlog / nlohmann::json / Eigen / ONNX Runtime
+业务代码  ->  my_cpp_libs::{core, log, json, math, infer, image, dsp, ml, net, http, cv}
+          ->  spdlog / nlohmann / Eigen / ONNX Runtime / stb / pocketfft / cpp-httplib / OpenCV(可选)
 ```
 
 ## 这是什么
@@ -15,6 +16,23 @@
    换库、换平台时业务代码不动。
 2. **调用演示工程**：`examples/` 里既有封装层的用法，也有各三方库**原生 API** 的常用写法对照，
    可以直接当速查手册用。
+
+## 预编译 SDK（`dist/`）
+
+全量包（含 ORT/OpenCV），拿到目录即可 `find_package`：
+
+| 包 | 平台/工具链 | 内含 |
+|---|---|---|
+| `my_cpp_libs-0.1.0-win-x64-msvc.zip` | Windows x64 / MSVC 19.3x | ORT 1.23.2 + OpenCV 4.12（DLL 在 `bin/`） |
+| `my_cpp_libs-0.1.0-linux-armv7-glibc230.tar.gz` | Zynq-7020 / PetaLinux 2020.2（glibc 2.30） | ORT 1.18.1 + OpenCV 4.12 |
+| `my_cpp_libs-0.1.0-linux-aarch64.tar.gz` | Pi 4B / 通用 aarch64（glibc ≥2.40 编译，可跑 2.41） | ORT 1.19.2 + OpenCV 4.12 |
+| `my_cpp_libs-0.1.0-win-x64-mingw-basic.zip` | Windows x64 / MinGW | **基础包**：无 ORT/OpenCV（ABI 不兼容，见 Deps.cmake） |
+
+```cmake
+find_package(my_cpp_libs CONFIG REQUIRED)
+target_link_libraries(app PRIVATE my_cpp_libs::all)
+my_cpp_libs_copy_runtime_dlls(app)   # 仅 Windows
+```
 
 ## 快速开始
 
@@ -36,6 +54,26 @@ ctest --preset win-msvc
 cmake --preset win-ubsan
 cmake --build --preset win-ubsan
 ctest --preset win-ubsan
+
+# 板端图像链路（不需要 OpenCV）：合成图 → 编解码 → letterbox → 推理 → 框映射回原图
+.\build\win-mingw\bin\example_image.exe
+
+# 信号链路：合成 4 个突发 → 频谱/找峰 → 突发检测 → 调制识别 → FSK 解调
+.\build\win-mingw\bin\example_signal.exe
+
+# sklearn 模型（iris 逻辑回归）：加载 → 单样本 → 批量
+.\build\win-msvc\bin\Release\example_ml.exe models\ml\iris_logreg.onnx
+
+# 网络：TCP 回显 + 分帧 + UDP 往返（回环）
+.\build\win-mingw\bin\example_net.exe
+
+# 把本库嵌进自己的工程（独立工程，add_subdirectory 验证）
+cmake -S examples\consumer_app -B build\consumer_app -G Ninja
+cmake --build build\consumer_app
+.\build\consumer_app\consumer_app.exe
+
+# HTTP：板端 REST + 客户端调用（可加一个 URL 指向你的 Flask）
+.\build\win-mingw\bin\example_http.exe
 
 # 交叉编译到 armv7：三个预设各有明确用途，别混
 cmake --preset linux-armv7          # 2024 SDK(glibc 2.39)：只做编译/链接验证
@@ -67,13 +105,21 @@ python scripts/make_test_model.py models/identity_1x1x4.onnx
 | json | `my_cpp_libs::json` | nlohmann/json 3.12 | 全平台 | 路径式访问 `a.b[0].c`、异常转 Status、结构体映射 |
 | math | `my_cpp_libs::math` | Eigen 5.0 | 全平台 | 姿态转换、线性方程、最小二乘、统计/滤波 |
 | infer | `my_cpp_libs::infer` | ONNX Runtime 1.23 / ncnn | **x64 + armv7 + aarch64** | 双后端可插拔；含预处理/后处理（归一化、letterbox、softmax、NMS） |
-| cv | `my_cpp_libs::cv` | OpenCV 4.12（可选） | x64（armv7 待编） | 图像 IO、letterbox 预处理、坐标逆变换 |
+| dsp | `my_cpp_libs::dsp` | pocketfft | **全平台（含 armv7）** | 频谱/PSD、FIR/IIR、混频抽取、突发检测、调制识别、AM/FM/ASK/FSK/BPSK 解调 |
+| ml | `my_cpp_libs::ml` | ONNX Runtime（模型由 skl2onnx 导出） | 随 infer（x64 + armv7） | sklearn 表格模型：双输出、特征顺序校验、类别名映射、批量推理；**不新增 C++ 三方库** |
+| net | `my_cpp_libs::net` | —（裸 socket） | **全平台** | TCP 客户端/服务端、UDP 广播组播、超时、SIGPIPE 安全、长度前缀分帧 |
+| http | `my_cpp_libs::http` | cpp-httplib 0.66 | 全平台 | HTTP 客户端 + 服务端、JSON 便捷接口、线程池可配；公共头不暴露 httplib |
+| image | `my_cpp_libs::image` | stb_image 2.32 | **全平台（含 armv7）** | 解码/编码、缩放、letterbox→张量；**不依赖 OpenCV**，板端走这条 |
+| cv | `my_cpp_libs::cv` | OpenCV 4.12（可选） | x64 + **armv7**（`dist/opencv-4.12.0-armv7`） | 图像 IO、letterbox 预处理、坐标逆变换 |
 
 ## 板端实测（Zynq-7020, Cortex-A9 @666MHz）
 
 | 项目 | 结果 |
 |---|---|
-| 单元测试 | 63 / 63 通过（ORT + ncnn 双后端） |
+| 单元测试 | **158 / 158 通过（2026-11-16 上板实测，全组件，2 秒跑完）**；宿主端 150（无 OpenCV）/ 158（有 OpenCV） |
+| 板端性能（Zynq-7020） | ml 表格模型 ≈0.07~0.10 ms/次；dsp 全链路 67 ms；image 957 ms；net 36 ms；http 141 ms（见 [06 §0](docs/06-板端验证手册.md)） |
+| 板端性能（Pi 4B / aarch64） | **158/158 通过（1 秒）**；ml 0.016~0.017 ms/次；bench_cnn 74 ms（比 A9 快 10.4×）（见 [06 §0.7](docs/06-板端验证手册.md)） |
+| **全依赖上板** | ✅ 8 个三方库全部有 armv7 产物：Eigen / nlohmann / spdlog / stb / pocketfft（头文件或源码）+ ORT 1.18.1 + ncnn + **OpenCV 4.12（GLIBC_2.29）** |
 | small_cnn（32×32） | 2.47 ms |
 | bench_cnn（224×224, ≈300 MMAC） | **585 ms**（ncnn）/ **865 ms**（ORT） |
 | MobileNetV2-12（官方模型） | **1367 ms**（ORT） |
@@ -112,7 +158,7 @@ wsl -d Ubuntu-24.04 -u root -- bash scripts/run-tests-asan-wsl.sh
 
 ```
 CMakeLists.txt          顶层：选项、平台探测、安装
-CMakePresets.json       五个目标平台的预设
+CMakePresets.json       10 个 configure 预设（Windows 可见 7 个，Linux 另 3 个）
 cmake/
   Platform.cmake        架构/平台宏、统一 target 工厂
   Deps.cmake            三方库挂载（自动解压 resources/*.zip）
@@ -120,12 +166,12 @@ cmake/
 include/my_cpp_libs/    对外公共头
 src/                    组件实现
 examples/               封装层示例 + 原生 API 示例 + 独立消费方工程
-tools/                  命令行工具（model_inspect）+ 模型生成脚本
-tests/                  无依赖的单元测试（79 个用例；MinGW 无 OpenCV 时 73 个）
-models/                 测试模型（脚本生成，含 7 种形态）
-scripts/                构建脚本、ONNX Runtime 交叉编译脚本
+tools/                  命令行工具（model_inspect）+ 模型生成脚本 + sklearn 导出工具
+tests/                  无依赖的单元测试（150 个用例，开启 OpenCV 时 158 个；另有 no-exceptions 子集 64 个）
+models/                 测试模型（脚本生成：7 种 ONNX 形态 + ml/ 下的 sklearn 演示模型与 golden）
+scripts/                构建脚本、ONNX Runtime / OpenCV 交叉编译脚本
 third_party/            由 resources/*.zip 自动解压（不入库）
-docs/                   规划、API、构建、推理、OpenCV
+docs/                   规划、API、构建、推理、OpenCV、板端验证、图像链路、信号处理
 ```
 
 ## 文档
@@ -136,6 +182,14 @@ docs/                   规划、API、构建、推理、OpenCV
 - [推理方案与模型兼容性](docs/04-推理方案与模型兼容性.md) —— 模型转换、7 类形态实测、Zynq 算力边界、ORT 交叉编译
 - [OpenCV 接入方案](docs/05-OpenCV接入方案.md) —— 各平台获取方式、armv7 裁剪编译、预处理整合
 - [板端验证手册](docs/06-板端验证手册.md) —— 部署脚本、必跑项目、错误对照、ORT vs ncnn 判定
+- [图像链路与无异常构建](docs/07-图像链路与无异常构建.md) —— 为什么用 stb、letterbox 精度、
+  `-fno-exceptions` 的真值表与 CI 守护方式
+- [信号处理与解调](docs/08-信号处理与解调.md) —— 频谱/滤波/检测/识别的判决树、
+  解调实现要点、为什么暂不引 liquid-dsp、板端算力参考
+- [机器学习模型集成](docs/09-机器学习模型集成.md) —— sklearn→ONNX 导出链路、my::ml API、
+  golden 对拍、模型覆盖面与板端体积/延迟
+- [网络与 HTTP](docs/10-网络与HTTP.md) —— 为什么 TCP/UDP 自己封、为什么 HTTP 引 cpp-httplib、
+  板端线程池/超时注意事项
 
 ## 三方库来源
 
@@ -153,6 +207,9 @@ docs/                   规划、API、构建、推理、OpenCV
 | eigen-5.0.0.zip | 5.0.0 | 纯头文件 |
 | json-include.zip | nlohmann/json 3.12.0 | 纯头文件 |
 | spdlog-1.17.0.zip | 1.17.0 | 源码 + CMake |
+| stb-image-2.32.zip | stb_image 2.32 / stb_image_write 1.18 | 两个 `.h`（按 commit pin + SHA256，由 fetch 脚本生成） |
+| pocketfft-4d865cb.zip | pocketfft @ 4d865cb | 单个 `.h`（同上） |
+| httplib-0.66.0.zip | cpp-httplib 0.66.0 | 单个 `.h` + LICENSE（同上） |
 
 按平台自备（**不在** resources/ 里，缺了自动降级，不会阻断构建）：
 

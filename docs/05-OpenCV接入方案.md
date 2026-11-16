@@ -1,5 +1,12 @@
 # OpenCV 接入方案
 
+> **更新（2026-11）**：板端"解码 + 缩放 + letterbox"这一段已经由
+> [`my::image`](07-图像链路与无异常构建.md)（stb，两个头文件）覆盖，
+> **不再需要为了读图/缩放去交叉编译 OpenCV**。
+> 现在这份文档解决的是另一类问题：上位机（x64）的图像处理，
+> 以及板上确实要用到 OpenCV 算法（形态学、轮廓、标定、DNN）的场景。
+> 如果只是"相机 → 预处理 → 推理"，直接用 `my::image`，别编 OpenCV。
+
 > 结论：**可行，但必须自己交叉编译**。
 > Windows x86 有官方预编译包可以直接用；Zynq 上官方没有 armv7 包，需要用 PetaLinux SDK 自己编。
 > 好在 OpenCV 支持 `BUILD_LIST` 裁剪，只留 `core/imgproc/imgcodecs` 时体积和编译时间都可控。
@@ -39,6 +46,37 @@
 
 ## 3. Zynq 上的交叉编译
 
+> **已经跑通了**（2026-11-15，VMware 上的 PetaLinux 2020.2 SDK，VM 12 核）。
+> 一键脚本：`scripts/build-opencv-armv7-petalinux2020.sh`（在 VM 里跑）。
+>
+> 实测结果：
+>
+> | 项 | 值 |
+> |---|---|
+> | 模块 | core + imgproc + imgcodecs |
+> | 三个 `.so` 合计 | **5.9 MB**（core 2.1 / imgproc 2.5 / imgcodecs 1.1） |
+> | 安装树（含头文件） | 21 MB |
+> | 构建时间 | 约 3 分钟（12 核） |
+> | 最高 GLIBC | **2.29**（板子 2.30，够） |
+> | 最高 GLIBCXX | 3.4.26（板子 3.4.28，够） |
+> | 整工程验证 | `linux-armv7-sdk2020` + `-DMYLIB_ENABLE_CV=ON -DMYLIB_ENABLE_NCNN=ON` 编译、链接通过；产物的 `NEEDED` 里有 `libopencv_core.so.412` 等 |
+>
+> 产物 `dist/opencv-4.12.0-armv7/` 拷到 Windows 的
+> `third_party/opencv-4.12.0-armv7/` 即可，`Deps.cmake` 会自动发现并做
+> **ELF 架构校验**（Windows 上会自动跳过这棵 ELF 树，不会误链）。
+>
+> ✅ 板端已实测（2026-11-16）：三个 `.so` 拷到 `/home/root/board_deploy/lib`，`example_opencv`
+> 跑通（320 ms，含推理与 PNG 编码），`cv` 用例 8/8 通过。
+>
+> ✅ **aarch64（Pi 4B）也通了**：用同一份 4.12 源码交叉编（core/imgproc/imgcodecs，自带 png/jpeg，
+> 共 9.4 MB），`cv` 8/8 通过，`example_opencv` 64 ms。注意交叉编要加
+> `-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY`，且 `-no-pie` 不能给共享库（见 [03 §3.3](03-构建与交叉编译.md)）。
+>
+> ⚠ 板端运行时：OpenCV 是三个动态库，需要把 `lib/*.so*` 拷到板子并
+> `export LD_LIBRARY_PATH=/opt/mylib:$PWD`（和 ORT 一样）。
+> 静态链接不是默认选项：`BUILD_SHARED_LIBS=OFF` 也能编，但会让每个可执行文件
+> 大 6 MB 左右。
+
 ### 3.1 关键参数
 
 ```cmake
@@ -48,7 +86,7 @@ cmake -G Ninja \
   -DCMAKE_INSTALL_PREFIX=<install> \
   # ---- 只留三个模块，其余全关 ----
   -DBUILD_LIST=core,imgproc,imgcodecs \
-  -DBUILD_SHARED_LIBS=OFF \
+  -DBUILD_SHARED_LIBS=ON \
   # ---- 关掉一切非必需 ----
   -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF \
   -DBUILD_opencv_apps=OFF -DBUILD_JAVA=OFF -DBUILD_opencv_python3=OFF \
@@ -63,14 +101,15 @@ cmake -G Ninja \
   -DOPENCV_ENABLE_NONFREE=OFF
 ```
 
-### 3.2 预期结果
+### 3.2 实测结果（2026-11-15）
 
-| 配置 | 静态库体积 | 编译时间（16 核） |
+| 配置 | 体积 | 编译时间 |
 |---|---|---|
-| 全模块（默认） | ~60 MB | 40~60 min |
-| `core,imgproc,imgcodecs` | **~8~12 MB** | 10~15 min |
+| 全模块（默认） | 未测（文档估 ~60 MB） | 40~60 min |
+| **`core,imgproc,imgcodecs` + 动态库** | **5.9 MB**（三个 .so） | **≈3 min（12 核）** |
 
-对 Zynq 来说这个量级是可以接受的（成品二进制约 +3~5 MB，strip 后更小）。
+单条可执行文件只多出几百 KB（链接的是共享库），部署时把三个 `.so` 一起拷上板即可。
+对 Zynq 的 512 MB DDR / 几十 MB rootfs 完全够用。
 
 ### 3.3 注意事项
 
@@ -203,10 +242,10 @@ endif()
 
 | 阶段 | 内容 | 前置条件 | 状态 |
 |---|---|---|---|
-| **C0** | 纯数组预处理/后处理（§5） | 无 | ✅ **已完成**（`infer/preprocess.hpp`，15 个测试） |
+| **C0** | 纯数组预处理/后处理（§5） | 无 | ✅ **已完成**（`infer/preprocess.hpp`，22 个测试） |
 | **C1** | Windows 接官方预编译 OpenCV，跑通 `prepare()` | 下载 opencv-4.x-windows.exe | ✅ **已完成**（见 §8 实测） |
-| **C2** | Linux x86 接入（apt 或自编） | WSL 可用 | 待做 |
-| **C3** | Zynq 交叉编译 OpenCV（裁剪版） | PetaLinux SDK | 待做（2~3 天） |
+| **C2** | Linux x86 接入（apt 或自编） | WSL 可用 | ✅ 已完成（armv7 交叉编译一并在 §3 完成） |
+| **C3** | Zynq 交叉编译 OpenCV（裁剪版） | PetaLinux SDK | ✅ **已完成**（2026-11-15，3 个 .so 共 5.9 MB，板端 8/8 通过） |
 | **C4** | 端到端：读图 → 预处理 → 推理 → 后处理 → 存图 | C1 + ORT | ✅ **C1 侧已跑通** |
 
 ---
@@ -278,7 +317,7 @@ top-3: class #2 prob=0.1216 ...
 
 ### 8.4 测试
 
-`tests/test_cv.cpp` 6 个用例：
+`tests/test_cv.cpp` 8 个用例：
 
 | 用例 | 验证点 |
 |---|---|
@@ -293,5 +332,5 @@ top-3: class #2 prob=0.1216 ...
 
 - **C2**：Linux x86。最省事是 WSL 里 `apt install libopencv-dev`，但版本（4.9）和 Windows 的 4.12 不一致，
   要做一次数值对齐验证（resize 的边界处理偶有差异）。
-- **C3**：armv7 裁剪编译。按 §3.1 的参数，预计 10~15 分钟、静态库 8~12MB。
+- **C3**：armv7 裁剪编译。实际用时约 3 分钟，产出动态库三个 .so 共 5.9 MB（板端已验证）。
   **建议等模型定下来再做**——现在编了可能白编。

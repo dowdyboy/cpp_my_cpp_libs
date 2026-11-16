@@ -1,0 +1,137 @@
+# =============================================================================
+#  my_cpp_libs SDK —— find_package(my_cpp_libs CONFIG REQUIRED)
+#
+#  由 CMake 在安装时生成。它把「组件静态库 + 公共头需要的三方依赖 + 平台宏」
+#  都声明成 IMPORTED target，所以消费方只需要：
+#
+#      find_package(my_cpp_libs CONFIG REQUIRED)
+#      target_link_libraries(app PRIVATE my_cpp_libs::log my_cpp_libs::all)
+#      my_cpp_libs_copy_runtime_dlls(app)     # 仅 Windows（ORT/OpenCV 的 DLL）
+#
+#  安装目录布局：
+#      include/my_cpp_libs/...   ｜ include/{nlohmann,Eigen,spdlog,opencv4}/...（公共头需要）
+#      lib/libmy_cpp_libs_*.a    ｜ lib/libspdlog.a ｜ lib/libonnxruntime.so.* / opencv_*.so.*
+#      bin/*.dll                 ｜ lib/cmake/my_cpp_libs/*.cmake
+# =============================================================================
+cmake_minimum_required(VERSION 3.20)
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+get_filename_component(my_cpp_libs_PREFIX "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+set(my_cpp_libs_INCLUDE_DIRS "${my_cpp_libs_PREFIX}/@CMAKE_INSTALL_INCLUDEDIR@")
+set(my_cpp_libs_LIB_DIR      "${my_cpp_libs_PREFIX}/@CMAKE_INSTALL_LIBDIR@")
+set(my_cpp_libs_BIN_DIR      "${my_cpp_libs_PREFIX}/@CMAKE_INSTALL_BINDIR@")
+
+# ----------------------------------------------------------------- 平台
+if(NOT TARGET my_cpp_libs::platform)
+    add_library(my_cpp_libs::platform INTERFACE IMPORTED)
+    set_target_properties(my_cpp_libs::platform PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${my_cpp_libs_INCLUDE_DIRS}"
+        INTERFACE_COMPILE_DEFINITIONS "@MYLIB_SDK_PLATFORM_DEFS@")
+    # spdlog / 我们的线程相关代码都要 pthread（Windows 上 Threads::Threads 基本为空）
+    set_property(TARGET my_cpp_libs::platform APPEND PROPERTY
+                 INTERFACE_LINK_LIBRARIES Threads::Threads)
+    if(WIN32)
+        set_property(TARGET my_cpp_libs::platform APPEND PROPERTY
+                     INTERFACE_LINK_LIBRARIES ws2_32)
+    endif()
+    if(MSVC)
+        # 公共头里有中文，必须 /utf-8（否则 "常量中有换行符"）
+        set_property(TARGET my_cpp_libs::platform APPEND PROPERTY
+                     INTERFACE_COMPILE_OPTIONS /utf-8 /Zc:__cplusplus)
+        set_property(TARGET my_cpp_libs::platform APPEND PROPERTY
+                     INTERFACE_COMPILE_DEFINITIONS NOMINMAX WIN32_LEAN_AND_MEAN)
+    endif()
+endif()
+
+# ----------------------------------------------------------------- 三方（公共头需要）
+if(NOT TARGET my_cpp_libs::deps_nlohmann)
+    add_library(my_cpp_libs::deps_nlohmann INTERFACE IMPORTED)
+    set_target_properties(my_cpp_libs::deps_nlohmann PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${my_cpp_libs_INCLUDE_DIRS}")
+endif()
+if(NOT TARGET my_cpp_libs::deps_eigen)
+    add_library(my_cpp_libs::deps_eigen INTERFACE IMPORTED)
+    set_target_properties(my_cpp_libs::deps_eigen PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${my_cpp_libs_INCLUDE_DIRS}")
+endif()
+
+if(NOT "@MYLIB_SDK_SPDLOG_LIB@" STREQUAL "" AND NOT TARGET my_cpp_libs::deps_spdlog)
+    add_library(my_cpp_libs::deps_spdlog STATIC IMPORTED)
+    set_target_properties(my_cpp_libs::deps_spdlog PROPERTIES
+        IMPORTED_LOCATION "${my_cpp_libs_LIB_DIR}/@MYLIB_SDK_SPDLOG_LIB@"
+        INTERFACE_INCLUDE_DIRECTORIES "${my_cpp_libs_INCLUDE_DIRS}"
+        INTERFACE_COMPILE_DEFINITIONS "SPDLOG_COMPILED_LIB=1")
+endif()
+
+if(EXISTS "${my_cpp_libs_LIB_DIR}/@MYLIB_SDK_STATIC_PREFIX@mylib_stb_impl@MYLIB_SDK_STATIC_SUFFIX@"
+   AND NOT TARGET my_cpp_libs::stb_impl)
+    add_library(my_cpp_libs::stb_impl STATIC IMPORTED)
+    set_target_properties(my_cpp_libs::stb_impl PROPERTIES
+        IMPORTED_LOCATION "${my_cpp_libs_LIB_DIR}/@MYLIB_SDK_STATIC_PREFIX@mylib_stb_impl@MYLIB_SDK_STATIC_SUFFIX@")
+endif()
+
+# ONNX Runtime：infer/ml 运行期 + 链接期都要（公共头不暴露 ORT 类型，所以不用头）
+if(NOT "@MYLIB_SDK_ORT_LIB@" STREQUAL "" AND NOT TARGET my_cpp_libs::deps_onnxruntime)
+    add_library(my_cpp_libs::deps_onnxruntime SHARED IMPORTED)
+    if(WIN32)
+        set_target_properties(my_cpp_libs::deps_onnxruntime PROPERTIES
+            IMPORTED_IMPLIB "${my_cpp_libs_LIB_DIR}/@MYLIB_SDK_ORT_LIB@"
+            IMPORTED_LOCATION "${my_cpp_libs_BIN_DIR}/@MYLIB_SDK_ORT_DLL@")
+    else()
+        set_target_properties(my_cpp_libs::deps_onnxruntime PROPERTIES
+            IMPORTED_LOCATION "${my_cpp_libs_LIB_DIR}/@MYLIB_SDK_ORT_LIB@")
+    endif()
+endif()
+
+# OpenCV：cv 组件用（头 + 库）。Linux 下是绝对的 .so 文件名列表。
+if(NOT "@MYLIB_SDK_OCV_LIBS@" STREQUAL "" AND NOT TARGET my_cpp_libs::deps_opencv)
+    add_library(my_cpp_libs::deps_opencv INTERFACE IMPORTED)
+    set_target_properties(my_cpp_libs::deps_opencv PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${my_cpp_libs_PREFIX}/@MYLIB_SDK_OCV_INCLUDE@")
+    set(_mylib_ocv_link "")
+    foreach(_l @MYLIB_SDK_OCV_LIBS@)
+        list(APPEND _mylib_ocv_link "${my_cpp_libs_LIB_DIR}/${_l}")
+    endforeach()
+    set_property(TARGET my_cpp_libs::deps_opencv PROPERTY
+                 INTERFACE_LINK_LIBRARIES "${_mylib_ocv_link}")
+endif()
+
+# ----------------------------------------------------------------- 组件
+function(_mylib_sdk_add_component name link_list)
+    string(TOUPPER "${name}" _upper)
+    add_library(my_cpp_libs::${name} STATIC IMPORTED)
+    set_target_properties(my_cpp_libs::${name} PROPERTIES
+        IMPORTED_LOCATION
+            "${my_cpp_libs_LIB_DIR}/@MYLIB_SDK_STATIC_PREFIX@my_cpp_libs_${name}@MYLIB_SDK_STATIC_SUFFIX@"
+        INTERFACE_INCLUDE_DIRECTORIES "${my_cpp_libs_INCLUDE_DIRS}"
+        INTERFACE_COMPILE_DEFINITIONS "MYLIB_ENABLE_${_upper}_COMPONENT=1")
+    set(_links my_cpp_libs::platform)
+    if(link_list)
+        list(APPEND _links ${link_list})
+    endif()
+    set_property(TARGET my_cpp_libs::${name} PROPERTY
+                 INTERFACE_LINK_LIBRARIES "${_links}")
+endfunction()
+
+@MYLIB_SDK_COMPONENTS_BLOCK@
+
+# ----------------------------------------------------------------- 便捷聚合
+add_library(my_cpp_libs::all INTERFACE IMPORTED)
+set_property(TARGET my_cpp_libs::all PROPERTY
+             INTERFACE_LINK_LIBRARIES "@MYLIB_SDK_ALL_LINKS@")
+
+# Windows：把随包的 ORT/OpenCV DLL 拷到目标旁边
+function(my_cpp_libs_copy_runtime_dlls target)
+    if(NOT WIN32)
+        return()
+    endif()
+    file(GLOB _mylib_dlls "${my_cpp_libs_BIN_DIR}/*.dll")
+    foreach(_dll ${_mylib_dlls})
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${_dll}" "$<TARGET_FILE_DIR:${target}>/")
+    endforeach()
+endfunction()
+
+set(my_cpp_libs_FOUND TRUE)

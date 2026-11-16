@@ -129,7 +129,7 @@ Result<VecXd> least_squares(const MatXd& A, const VecXd& b) {
     if (b.size() != A.rows()) {
         return Status(Errc::InvalidArgument, "右端向量维度与矩阵不匹配");
     }
-    if (!all_finite(b)) {
+    if (!all_finite(A) || !all_finite(b)) {
         return Status(Errc::InvalidArgument, "least_squares 输入包含非有限值");
     }
 

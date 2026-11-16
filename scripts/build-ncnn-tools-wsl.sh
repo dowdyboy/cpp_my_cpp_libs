@@ -14,7 +14,7 @@
 # =============================================================================
 set -euo pipefail
 
-SRC_SRC="/mnt/d/syncworkspace/cpp_my_cpp_libs/third_party/ncnn-src"
+SRC_SRC="$(cd "$(dirname "$0")/.." && pwd)/third_party/ncnn-src"
 WORK="${WORK:-/opt/ncnn-tools}"
 SRC="$WORK/ncnn-src"
 BUILD="$WORK/ncnn-build"

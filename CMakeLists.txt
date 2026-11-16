@@ -143,20 +143,205 @@ if(MYLIB_BUILD_TESTS)
 endif()
 
 # -----------------------------------------------------------------------------
-# 安装
+# 安装（SDK）
 #
-# 说明：本库推荐的消费方式是 add_subdirectory（源码分发，换平台就换工具链重编，
-# 天然没有 ABI 问题）。因此这里只做最朴素的安装：头文件 + 静态库。
-# 带 export set 的 find_package 打包留到 v0.2（需要一并处理 Eigen/nlohmann
-# 这类头文件依赖的导出策略）。
+# 目标：别的 C++ 工程拿到安装目录后，只要
+#     find_package(my_cpp_libs CONFIG REQUIRED)
+#     target_link_libraries(app PRIVATE my_cpp_libs::log my_cpp_libs::cv ...)
+# 就能用全部组件，不需要自己装 spdlog / Eigen / nlohmann / ORT / OpenCV。
+#
+# 做法：安装 我们的头 + 静态库 + **公共头会用到的三方头**（json→nlohmann、
+# math→Eigen、log→spdlog）以及运行/链接需要的三方库（spdlog 静态库、
+# ORT/OpenCV 的 .so/.dll + import lib）；然后生成一份 my_cpp_libsConfig.cmake，
+# 在里面把每个组件、每个三方依赖都声明成 IMPORTED target。
+#
+# 作为子目录被别的工程 add_subdirectory 时，默认**不**添加安装规则。
 # -----------------------------------------------------------------------------
-include(GNUInstallDirs)
+if(MYLIB_INSTALL)
+    include(GNUInstallDirs)
+    include(CMakePackageConfigHelpers)
 
-install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(TARGETS ${MYLIB_EFFECTIVE_TARGETS}
-        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(TARGETS ${MYLIB_EFFECTIVE_TARGETS}
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+    # ---- 公共头需要的三方头 ----
+    if(TARGET mylib_json)
+        install(DIRECTORY "${MYLIB_DEP_nlohmann-json-3.12.0}/include/nlohmann"
+                DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    endif()
+    if(TARGET mylib_math)
+        install(DIRECTORY "${MYLIB_DEP_eigen-5.0.0}/Eigen"
+                DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    endif()
+    if(TARGET mylib_log)
+        install(DIRECTORY "${MYLIB_DEP_spdlog-1.17.0}/include/spdlog"
+                DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+        # spdlog 的编译产物（我们的 log 组件依赖它的符号）
+        install(TARGETS spdlog ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+        set(_sdk_spdlog_lib "${CMAKE_STATIC_LIBRARY_PREFIX}spdlog${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    else()
+        set(_sdk_spdlog_lib "")
+    endif()
+
+    # ---- ONNX Runtime（infer/ml 运行时 + 链接）----
+    set(_sdk_ort_lib "")
+    set(_sdk_ort_dll "")
+    if(TARGET deps::onnxruntime AND MYLIB_ORT_ROOT_DETECTED)
+        file(GLOB _ort_shared "${MYLIB_ORT_ROOT_DETECTED}/lib/libonnxruntime.so*"
+                              "${MYLIB_ORT_ROOT_DETECTED}/lib/onnxruntime.dll")
+        foreach(_f ${_ort_shared})
+            get_filename_component(_n "${_f}" NAME)
+            if(_n MATCHES "\\.dll$")
+                install(FILES "${_f}" DESTINATION ${CMAKE_INSTALL_BINDIR})
+                set(_sdk_ort_dll "${_n}")
+            else()
+                install(FILES "${_f}" DESTINATION ${CMAKE_INSTALL_LIBDIR})
+            endif()
+        endforeach()
+        file(GLOB _ort_implib "${MYLIB_ORT_ROOT_DETECTED}/lib/onnxruntime.lib")
+        if(_ort_implib)
+            install(FILES ${_ort_implib} DESTINATION ${CMAKE_INSTALL_LIBDIR})
+            set(_sdk_ort_lib "onnxruntime.lib")
+        else()
+            # Linux：链接时给具体的 soname 文件
+            file(GLOB _ort_so "${MYLIB_ORT_ROOT_DETECTED}/lib/libonnxruntime.so.*")
+            if(_ort_so)
+                get_filename_component(_n "${_ort_so}" NAME)
+                set(_sdk_ort_lib "${_n}")
+            endif()
+        endif()
+    endif()
+
+    # ---- OpenCV（cv 组件的头 + 库）----
+    set(_sdk_ocv_include "")
+    set(_sdk_ocv_libs "")
+    set(_sdk_ocv_dll "")
+    if(TARGET deps::opencv)
+        # 头目录：优先用 Deps 解析出来的，退回到 OpenCV_INCLUDE_DIRS
+        set(_ocv_inc "")
+        if(MYLIB_OPENCV_INCLUDE_DIR)
+            set(_ocv_inc "${MYLIB_OPENCV_INCLUDE_DIR}")
+        elseif(OpenCV_INCLUDE_DIRS)
+            list(GET OpenCV_INCLUDE_DIRS 0 _ocv_inc)
+        endif()
+        if(_ocv_inc AND IS_DIRECTORY "${_ocv_inc}")
+            get_filename_component(_incname "${_ocv_inc}" NAME)
+            if(_incname STREQUAL "opencv4")
+                install(DIRECTORY "${_ocv_inc}/" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/opencv4)
+                set(_sdk_ocv_include "${CMAKE_INSTALL_INCLUDEDIR}/opencv4")
+            else()
+                install(DIRECTORY "${_ocv_inc}/" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+                set(_sdk_ocv_include "${CMAKE_INSTALL_INCLUDEDIR}")
+            endif()
+        endif()
+
+        if(WIN32 AND DEFINED MYLIB_OPENCV_BIN_DIR)
+            file(GLOB _ocv_dlls "${MYLIB_OPENCV_BIN_DIR}/opencv_world[0-9]*.dll")
+            foreach(_f ${_ocv_dlls})
+                if(NOT _f MATCHES "d\\.dll$")
+                    install(FILES "${_f}" DESTINATION ${CMAKE_INSTALL_BINDIR})
+                    get_filename_component(_n "${_f}" NAME)
+                    set(_sdk_ocv_dll "${_n}")
+                    string(REPLACE ".dll" ".lib" _lib "${_n}")
+                    if(EXISTS "${MYLIB_OPENCV_BIN_DIR}/../lib/${_lib}")
+                        install(FILES "${MYLIB_OPENCV_BIN_DIR}/../lib/${_lib}"
+                                DESTINATION ${CMAKE_INSTALL_LIBDIR})
+                        set(_sdk_ocv_libs "${_lib}")
+                    endif()
+                endif()
+            endforeach()
+        else()
+            # Linux：从 OpenCV 安装树里收 .so（真实文件 + SONAME 软链名字都要）
+            set(_ocv_libdirs "${MYLIB_OPENCV_LIB_DIR}" "${OpenCV_DIR}" "${OpenCV_DIR}/.." "${OpenCV_DIR}/../..")
+            foreach(_d ${_ocv_libdirs})
+                if(NOT _d OR NOT IS_DIRECTORY "${_d}")
+                    continue()
+                endif()
+                file(GLOB _ocv_cand "${_d}/libopencv_*.so*")
+                if(_ocv_cand)
+                    foreach(_f ${_ocv_cand})
+                        get_filename_component(_n "${_f}" NAME)
+                        if(IS_SYMLINK "${_f}")
+                            get_filename_component(_t "${_f}" REALPATH)
+                            install(FILES "${_t}" DESTINATION ${CMAKE_INSTALL_LIBDIR} RENAME "${_n}")
+                        else()
+                            install(FILES "${_f}" DESTINATION ${CMAKE_INSTALL_LIBDIR})
+                        endif()
+                        list(APPEND _sdk_ocv_libs "${_n}")
+                    endforeach()
+                    list(REMOVE_DUPLICATES _sdk_ocv_libs)
+                    break()
+                endif()
+            endforeach()
+        endif()
+    endif()
+
+    # ---- 生成 Config / Version ----
+    set(MYLIB_SDK_PLATFORM_DEFS
+        "${MYLIB_ARCH_MACRO};MYLIB_PTR_SIZE=${MYLIB_PTR_SIZE};${MYLIB_OS_MACRO}")
+    set(MYLIB_SDK_STATIC_PREFIX "${CMAKE_STATIC_LIBRARY_PREFIX}")
+    set(MYLIB_SDK_STATIC_SUFFIX "${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    set(MYLIB_SDK_SPDLOG_LIB "${_sdk_spdlog_lib}")
+    set(MYLIB_SDK_ORT_LIB "${_sdk_ort_lib}")
+    set(MYLIB_SDK_ORT_DLL "${_sdk_ort_dll}")
+    set(MYLIB_SDK_OCV_INCLUDE "${_sdk_ocv_include}")
+    set(MYLIB_SDK_OCV_LIBS "${_sdk_ocv_libs}")
+    set(MYLIB_SDK_OCV_DLL "${_sdk_ocv_dll}")
+
+    # 每个组件在 SDK 里要额外链接什么（对应 src/CMakeLists 里的 PUBLIC 依赖）
+    set(_mylib_sdk_link_core       "")
+    set(_mylib_sdk_link_log        "my_cpp_libs::deps_spdlog")
+    set(_mylib_sdk_link_json       "my_cpp_libs::deps_nlohmann")
+    set(_mylib_sdk_link_math       "my_cpp_libs::deps_eigen")
+    set(_mylib_sdk_link_dsp        "")
+    set(_mylib_sdk_link_preprocess "my_cpp_libs::core")
+    set(_mylib_sdk_link_net        "")
+    set(_mylib_sdk_link_http       "my_cpp_libs::json")
+    set(_mylib_sdk_link_infer      "my_cpp_libs::preprocess")
+    if(TARGET deps::onnxruntime)
+        list(APPEND _mylib_sdk_link_infer my_cpp_libs::deps_onnxruntime)
+    endif()
+    set(_mylib_sdk_link_ml         "my_cpp_libs::infer;my_cpp_libs::json")
+    set(_mylib_sdk_link_image      "my_cpp_libs::preprocess;my_cpp_libs::stb_impl")
+    if(TARGET mylib_infer)
+        list(APPEND _mylib_sdk_link_image my_cpp_libs::infer)
+    endif()
+    set(_mylib_sdk_link_cv         "my_cpp_libs::preprocess;my_cpp_libs::deps_opencv")
+    if(TARGET mylib_infer)
+        list(APPEND _mylib_sdk_link_cv my_cpp_libs::infer)
+    endif()
+
+    unset(_sdk_components_code)
+    foreach(_c core log json math infer preprocess image dsp ml net http cv)
+        if(TARGET mylib_${_c})
+            string(APPEND _sdk_components_code
+                "_mylib_sdk_add_component(${_c} \"${_mylib_sdk_link_${_c}}\")\n")
+        endif()
+    endforeach()
+    set(MYLIB_SDK_COMPONENTS_BLOCK "${_sdk_components_code}")
+
+    set(_sdk_all_links "")
+    foreach(_c core log json math infer preprocess image dsp ml net http cv)
+        if(TARGET mylib_${_c})
+            list(APPEND _sdk_all_links "my_cpp_libs::${_c}")
+        endif()
+    endforeach()
+    set(MYLIB_SDK_ALL_LINKS "${_sdk_all_links}")
+
+    configure_file(cmake/my_cpp_libsConfig.cmake.in
+                   "${CMAKE_CURRENT_BINARY_DIR}/my_cpp_libsConfig.cmake" @ONLY)
+    write_basic_package_version_file(
+        "${CMAKE_CURRENT_BINARY_DIR}/my_cpp_libsConfigVersion.cmake"
+        VERSION ${PROJECT_VERSION} COMPATIBILITY SameMajorVersion)
+    install(FILES
+            "${CMAKE_CURRENT_BINARY_DIR}/my_cpp_libsConfig.cmake"
+            "${CMAKE_CURRENT_BINARY_DIR}/my_cpp_libsConfigVersion.cmake"
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/my_cpp_libs)
+    message(STATUS "[sdk] find_package 配置: ${CMAKE_INSTALL_LIBDIR}/cmake/my_cpp_libs")
+endif()
 
 # -----------------------------------------------------------------------------
 # 配置摘要
@@ -169,6 +354,36 @@ if(TARGET mylib_cv)
     set(_cv_desc "ON")
 else()
     set(_cv_desc "OFF")
+endif()
+
+if(TARGET mylib_image)
+    set(_image_desc "ON")
+else()
+    set(_image_desc "OFF")
+endif()
+
+if(TARGET mylib_dsp)
+    set(_dsp_desc "ON")
+else()
+    set(_dsp_desc "OFF")
+endif()
+
+if(TARGET mylib_ml)
+    set(_ml_desc "ON")
+else()
+    set(_ml_desc "OFF")
+endif()
+
+if(TARGET mylib_net)
+    set(_net_desc "ON")
+else()
+    set(_net_desc "OFF")
+endif()
+
+if(TARGET mylib_http)
+    set(_http_desc "ON")
+else()
+    set(_http_desc "OFF")
 endif()
 
 if(MYLIB_ENABLE_INFER)
@@ -208,11 +423,14 @@ message(STATUS "  Compiler        : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILE
 message(STATUS "  Cross-compiling : ${CMAKE_CROSSCOMPILING}")
 message(STATUS "  Build type      : ${CMAKE_BUILD_TYPE}${CMAKE_CONFIGURATION_TYPES}")
 message(STATUS "  Git commit      : ${MYLIB_GIT_COMMIT}")
-message(STATUS "  Components      : core=${MYLIB_ENABLE_CORE} log=${MYLIB_ENABLE_LOG} json=${MYLIB_ENABLE_JSON} math=${MYLIB_ENABLE_MATH} infer=${MYLIB_ENABLE_INFER} cv=${_cv_desc}")
+message(STATUS "  Components      : core=${MYLIB_ENABLE_CORE} log=${MYLIB_ENABLE_LOG} json=${MYLIB_ENABLE_JSON} math=${MYLIB_ENABLE_MATH} infer=${MYLIB_ENABLE_INFER} image=${_image_desc} dsp=${_dsp_desc} ml=${_ml_desc} net=${_net_desc} http=${_http_desc} cv=${_cv_desc}")
 message(STATUS "  Infer backend   : ${_infer_backend_desc}")
 message(STATUS "  ONNX Runtime    : ${_ort_pkg}")
 message(STATUS "  ncnn            : ${_ncnn_pkg}")
 message(STATUS "  OpenCV          : ${_cv_pkg}")
+if(MYLIB_NO_EXCEPTIONS)
+    message(STATUS "  Exceptions      : 关闭（-fno-exceptions，仅 core + math + dsp + net）")
+endif()
 if(MYLIB_SANITIZE)
     message(STATUS "  Sanitizer       : ${MYLIB_SANITIZE}")
 endif()

@@ -1,0 +1,63 @@
+{
+  "format": "my_cpp_libs.ml/1",
+  "kind": "regressor",
+  "model": {
+    "onnx": "ridge_10f.onnx",
+    "sha256": "0937CB030BA7580A3047115AB869B3C87B63CEF0D7369C9E372D0DE23C3F3A5D",
+    "opset": {
+      "ai.onnx.ml": 1,
+      "ai.onnx": 18
+    }
+  },
+  "input": {
+    "name": "input",
+    "dtype": "float32",
+    "n_features": 10,
+    "dims": [
+      -1,
+      10
+    ],
+    "features": [
+      "f0",
+      "f1",
+      "f2",
+      "f3",
+      "f4",
+      "f5",
+      "f6",
+      "f7",
+      "f8",
+      "f9"
+    ]
+  },
+  "output": {
+    "items": [
+      {
+        "name": "variable",
+        "dtype": "float",
+        "dims": [
+          -1,
+          1
+        ]
+      }
+    ],
+    "n_classes": 0,
+    "classes": [],
+    "class_ids": []
+  },
+  "preprocess": {
+    "type": "none",
+    "embedded_in_onnx": false
+  },
+  "training": {
+    "sklearn": "1.9.1",
+    "onnx": "1.20.1",
+    "onnxruntime": "1.23.0",
+    "python": "3.13.11",
+    "exported_utc": "2026-11-15T11:47:46Z"
+  },
+  "check": {
+    "max_abs_diff": 5.72964746083926e-05,
+    "samples": 256
+  }
+}

@@ -36,13 +36,22 @@ target_compile_features(mylib_platform INTERFACE cxx_std_17)
 target_compile_definitions(mylib_platform INTERFACE
     ${MYLIB_ARCH_MACRO}
     MYLIB_PTR_SIZE=${MYLIB_PTR_SIZE})
+# 公共头里有中文字符串字面量：MSVC 必须 /utf-8，否则消费方按 ANSI 读会报
+# "常量中有换行符"。这些选项要 PUBLIC，否则 add_subdirectory 的宿主工程也会中招。
+if(MSVC)
+    target_compile_options(mylib_platform INTERFACE /utf-8 /Zc:__cplusplus)
+    target_compile_definitions(mylib_platform INTERFACE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 
 if(WIN32)
     target_compile_definitions(mylib_platform INTERFACE MYLIB_OS_WINDOWS)
+    set(MYLIB_OS_MACRO MYLIB_OS_WINDOWS)
 elseif(APPLE)
     target_compile_definitions(mylib_platform INTERFACE MYLIB_OS_MACOS)
+    set(MYLIB_OS_MACRO MYLIB_OS_MACOS)
 elseif(UNIX)
     target_compile_definitions(mylib_platform INTERFACE MYLIB_OS_LINUX)
+    set(MYLIB_OS_MACRO MYLIB_OS_LINUX)
 endif()
 
 target_link_libraries(mylib_platform INTERFACE Threads::Threads)
@@ -74,6 +83,11 @@ function(mylib_add_component name)
 
     target_link_libraries(mylib_${name} PUBLIC mylib_platform ${ARG_LINK})
     target_link_libraries(mylib_${name} PRIVATE mylib_warnings)
+    # -fno-exceptions 之类的编译标志只在"本库 target"上生效：
+    # PRIVATE 链接 => 编译本组件时用，但不传染给消费方（消费方可能开着异常）。
+    if(TARGET mylib_noexcept)
+        target_link_libraries(mylib_${name} PRIVATE mylib_noexcept)
+    endif()
     if(TARGET mylib_sanitize)
         # PUBLIC：消毒器的链接选项必须出现在最终可执行文件的链接行上
         target_link_libraries(mylib_${name} PUBLIC mylib_sanitize)

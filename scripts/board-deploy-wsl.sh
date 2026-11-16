@@ -18,7 +18,7 @@ set -uo pipefail
 
 BOARD="${BOARD:-192.168.0.130}"
 PASS="${BOARD_PASS:-root}"
-LOCAL="${LOCAL_DIR:-/mnt/d/syncworkspace/cpp_my_cpp_libs}"
+LOCAL="${LOCAL_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 BIN="$LOCAL/build/linux-armv7-static/bin"
 DEST="${DEST:-/tmp/mylib}"
 
