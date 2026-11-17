@@ -102,7 +102,7 @@ if(MYLIB_NO_EXCEPTIONS)
     if(_noex_blocked)
         string(REPLACE ";" " / " _noex_str "${_noex_blocked}")
         message(FATAL_ERROR
-            "MYLIB_NO_EXCEPTIONS=ON 目前只支持 core + math + dsp + net，但以下组件还开着：${_noex_str}\n"
+            "mylib-noex-conflict: MYLIB_NO_EXCEPTIONS=ON 目前只支持 core + math + dsp + net，以下组件还开着：${_noex_str}\n"
             "\n"
             "原因：这些组件用异常上报错误（nlohmann / ONNX Runtime / OpenCV / spdlog），\n"
             "      关掉异常后只能退化成 abort()，会破坏 Status/Result 的契约。\n"

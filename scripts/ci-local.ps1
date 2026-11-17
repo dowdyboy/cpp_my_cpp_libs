@@ -120,7 +120,7 @@ foreach ($c in $cases) {
             # ② 与默认开启的 json 同开时必须 configure 失败（fail-closed）
             $badDir = 'build/ci-local-noex-bad'
             Remove-Item -Recurse -Force $badDir -ErrorAction SilentlyContinue
-            cmake -S . -B $badDir @('-G', 'Ninja', '-DMYLIB_NO_EXCEPTIONS=ON') *> $null
+            cmake -S . -B $badDir @('-G', 'Ninja', '-DMYLIB_NO_EXCEPTIONS=ON') *> "$badDir.log"
             if ($LASTEXITCODE -eq 0) {
                 throw 'NOEX 反向校验失败：开着 json 时 configure 竟然成功了'
             }

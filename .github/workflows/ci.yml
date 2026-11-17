@@ -196,7 +196,7 @@ jobs:
             cat /tmp/noex-bad.log
             exit 1
           fi
-          grep -q "只支持 core + math + dsp + net" /tmp/noex-bad.log
+          grep -q "mylib-noex-conflict" /tmp/noex-bad.log   # CMake 会折行，用短标记
 
   # ---------------------------------------------------------------- 交叉编译（只验证能编能链）
   cross:
