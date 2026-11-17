@@ -1,5 +1,11 @@
 # my_cpp_libs
 
+[![CI](https://github.com/dowdyboy/cpp_my_cpp_libs/actions/workflows/ci.yml/badge.svg)](https://github.com/dowdyboy/cpp_my_cpp_libs/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![GitHub](https://img.shields.io/badge/repo-dowdyboy%2Fcpp__my__cpp__libs-181717?logo=github)](https://github.com/dowdyboy/cpp_my_cpp_libs)
+
+> 仓库：<https://github.com/dowdyboy/cpp_my_cpp_libs> ｜ 许可证：[MIT](LICENSE)
+
 跨平台 C++17 三方库统一封装层 + 调用演示工程。
 
 一套源码，在 **Windows(x64/MSVC、MinGW)** 与 **Linux(x86_64、armv7-A/Zynq-7000、aarch64)** 上
@@ -223,3 +229,24 @@ docs/                   规划、API、构建、推理、OpenCV、板端验证�
 
 > armv7 上 `third_party` 里同时放着 1.18.1 和 1.23.2 两份 ORT 时会**优先选 1.18.1**
 > （目录名排序 + 架构校验），这正是板子需要的版本。configure 摘要里会打印最终选中的包名。
+
+## 许可证
+
+本项目使用 **MIT License**，见 [LICENSE](LICENSE)。
+
+随源码/二进制分发的三方库各自遵循其原始许可证：
+
+| 依赖 | 许可证 |
+|---|---|
+| spdlog | MIT |
+| nlohmann/json | MIT |
+| cpp-httplib | MIT |
+| stb_image / stb_image_write | MIT（或公有领域，二选一） |
+| Eigen | MPL-2.0 |
+| pocketfft | BSD-3-Clause |
+| ncnn | BSD-3-Clause |
+| ONNX Runtime | Apache-2.0 |
+| OpenCV | Apache-2.0 |
+
+> `dist/` 里的 SDK 包内含 ONNX Runtime / OpenCV 的二进制，再分发时请一并保留它们的
+> 许可证与 NOTICE（Apache-2.0 要求）。
