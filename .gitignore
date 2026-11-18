@@ -41,3 +41,8 @@ assess/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Int8 量化产物：由 tools/quantize_models.py 生成，可随时重跑；中间文件尤其不该入库
+models/int8/_work/
+models/int8/*_qdq.onnx
+models/int8/summary.json

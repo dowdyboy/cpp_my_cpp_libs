@@ -65,8 +65,8 @@ if(TARGET mylib_preprocess)
 endif()
 
 if(TARGET mylib_dsp)
-    list(APPEND _test_sources test_dsp.cpp)
-    list(APPEND _test_suites dsp)
+    list(APPEND _test_sources test_dsp.cpp test_dsp_stream.cpp)
+    list(APPEND _test_suites dsp dsp_stream)
     list(APPEND _test_links mylib_dsp)
 endif()
 

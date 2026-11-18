@@ -90,7 +90,7 @@ endif()
 # 和推理、图像都没有关系，板端可以单独编进去。
 if(MYLIB_ENABLE_DSP)
     mylib_add_component(dsp
-        SOURCES dsp/spectrum.cpp dsp/filter.cpp dsp/analyze.cpp dsp/demod.cpp
+        SOURCES dsp/spectrum.cpp dsp/filter.cpp dsp/stream.cpp dsp/analyze.cpp dsp/demod.cpp
         LINK mylib_core deps::pocketfft)
     target_compile_definitions(mylib_dsp PUBLIC MYLIB_ENABLE_DSP_COMPONENT=1)
     list(APPEND MYLIB_TARGETS mylib_dsp)

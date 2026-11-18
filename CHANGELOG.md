@@ -1,5 +1,77 @@
 # 变更记录
 
+## 0.1.3（2026-11-18）—— 可复现打包 + Int8 实测 + DSP 流式处理
+
+三件事：把 SDK 包变成"一条命令能重建"、把 Int8 量化从"性价比第一名（无数字）"变成实测结论、
+把 `dsp` 从"只能整段批处理"补上流式状态对象。
+
+### 1. 打包：CPack + 包内许可证（`cmake/Packaging.cmake`）
+
+评估报告里 `dist/` 的两条问题（C1 不可重建、C2 包内零许可证）在这版修掉。
+
+- CPack 直接打 `install` 树：Windows 出 ZIP、Linux 出 TGZ，
+  产物 `my_cpp_libs-<版本>-<suffix>.zip|.tar.gz`，顶层目录也带版本；
+- **包名后缀强制显式给**（`-DMYLIB_PACKAGE_SUFFIX=`）：glibc 版本 CMake 推不出来，
+  "用 2.39 编的包装到 2.30 的板子上"是最容易犯的错；
+- `CPACK_PACKAGE_DESCRIPTION` 写入 git commit / 编译器 / 构建类型 / 组件清单；
+- 包内 `share/licenses/my_cpp_libs/`：我们的 MIT + spdlog/fmt/nlohmann/Eigen/httplib/
+  ORT（含 `ThirdPartyNotices.txt`）/OpenCV/ncnn 的原始许可证；stb 与 pocketfft 没有独立
+  LICENSE 文件（声明在头文件里），直接把源文件装进 `licenses/sources/`；
+- 缺任何一份许可证会打印 `[pkg] 找不到许可证 ...`，作为发布前的红灯；
+- 新增 `docs/THIRD_PARTY_NOTICES.md`（逐个依赖的许可证/再分发注意事项）。
+
+四个包全部验证过"解开 → `find_package` → 编 → 跑"（Windows 两个真跑，交叉包检查 ELF 架构/`.so` 依赖）。
+
+### 2. Int8 量化：从口号到数字（`tools/quantize_models.py` + [docs/12](docs/12-量化实测.md)）
+
+用**我们自己的 `model_inspect`**（`my::infer` + ORT）在 x86_64 实测：
+
+| 模型 | fp32 | Int8 (QDQ) | 加速 | 体积 |
+|---|---|---|---|---|
+| `small_cnn` 1×3×32×32 | 0.054 ms | 0.088 ms | **0.61×（更慢）** | 22 → 11 KB（2.03×）|
+| `bench_cnn` 1×3×224×224 | 6.83 ms | 5.03 ms | **1.36×** | 551 → 149 KB（3.69×）|
+| `mobilenetv2-12` | 11.27 ms | 5.55 ms | **2.03×** | 13.6 MB → 3.7 MB（3.64×）|
+
+顺带纠正了三个假设：
+
+1. **小模型上量化会更慢**（Q/DQ 开销 > 计算节省），32×32 模型实测 0.61×；
+2. **合成校准数据不可信**：MobileNet 用合成数据校准后 top-1 一致率 0~50%、
+   余弦 0.91~0.97（三种合成分布都试过）。精度必须用真实图片重跑 `--calib-dir`；
+3. **ARMv7 上别照搬 x86 数字**：Cortex-A9 没有 int8 点积指令，
+   `docs/04 §8` 里"Zynq 上 2~3×"应改成条件句，且必须先上板测。
+
+另外两个"量化阶段不报错、加载时才炸"的坑也写进了文档与脚本：
+opset < 13 的模型必须先升 opset（`Q/DQ` 的 `axis` 属性是 opset 13 引入的），
+以及 `quantize_dynamic` 对 CNN 会产出 ORT 未实现的 `ConvInteger`。
+
+### 3. DSP 流式处理（`include/my_cpp_libs/dsp/stream.hpp`）
+
+板端是"每帧一块"的，而 `dsp` 之前只有整段批处理 API。新增 5 个跨块保持状态的对象：
+
+| 类 | 保持的状态 | 与批量版的关系 |
+|---|---|---|
+| `FirFilter` | 延迟线 | `process()` 逐块 + `flush()` == `fir_apply()` 整段，逐点一致 |
+| `BiquadFilter` | 每级转置直接 II 型的 z1/z2 | == 逐级 `biquad_apply()` |
+| `ComplexMixer` | NCO 相位累加器 | == `mix_down()`（相位跨块连续，这是流式混频最容易写错的地方）|
+| `Decimator` | FIR 状态 + 抽取相位 | == `decimate()`（符号数与数值都一致）|
+| `Agc` | 增益 + 功率估计 | 新增（批量版没有）|
+
+新增 10 个用例（套件 `dsp_stream`），核心是"同一段信号分别走批量与流式两条路，
+逐点 `CHECK_NEAR`"——不是"看着对"，是钉住的。0 长度块、1 长度块、不规则块长、
+非法参数都覆盖。`stream.cpp` 在 `-fno-exceptions` 下也能编（`dsp` 在子集里）。
+
+### 验证矩阵
+
+| 配置 | 结果 |
+|---|---|
+| MinGW x64 Release | **263/263**（261 用例 + 2 守卫） |
+| MSVC x64 Release（ORT + ncnn + OpenCV） | **271/271**（261 + cv 8 + 2） |
+| Linux gcc Debug（断言全开） | **263/263** |
+| Linux ASan（Debug + 泄漏检测） | 261 用例 0 失败（8 个 ml 显式跳过） |
+| Linux TSan | **263/263，无数据竞争** |
+| `-fno-exceptions`（core+math+dsp+net+io+time） | **124/124**（含 dsp_stream 10 个） |
+| `install` → `find_package`（4 个包） | 全部解开→编→跑通过 |
+
 ## 0.1.2（2026-11-18）—— 工程底座：io / time / thread / 分层配置
 
 0.1.1 把安全网补上之后，这一版开始按 roadmap 的 P1 顺序补组件。四个都只依赖标准库
