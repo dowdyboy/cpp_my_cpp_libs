@@ -60,6 +60,31 @@ opset < 13 的模型必须先升 opset（`Q/DQ` 的 `axis` 属性是 opset 13 �
 逐点 `CHECK_NEAR`"——不是"看着对"，是钉住的。0 长度块、1 长度块、不规则块长、
 非法参数都覆盖。`stream.cpp` 在 `-fno-exceptions` 下也能编（`dsp` 在子集里）。
 
+### 4. ARM 单测真跑（qemu CI）+ 一条命令发布
+
+**`qemu-test` job（CI）**：在此之前"5 个平台"里的 ARM 证据只到"能编能链"。
+新增的 job 用 `qemu-arm-static` / `qemu-aarch64-static` 把 armv7 与 aarch64 的单测**真的跑一遍**。
+
+要做到"能跑"有两个关键选择（都验证过）：
+
+- 产物链接成**全静态**（`-DCMAKE_EXE_LINKER_FLAGS=-static`）→ qemu 直接执行，
+  **不需要 `-L <sysroot>`**。本地实测 armv7 产物 4.45 MB / aarch64 19.7 MB，
+  `readelf -d` 输出 "no dynamic section"；
+- **不注册 binfmt**，把 `qemu-*-static` 当解释器直接调用，绕开 `update-binfmts` 的权限问题。
+
+job 里还有一道防退化检查：`readelf -d | grep NEEDED` 命中就判失败，
+避免"`-static` 悄悄失效"变成一堆看不懂的 qemu 报错。
+
+**`scripts/release.ps1`**：把"发布"固定成一条命令 —— 读版本号 → 推 `main`+tag →
+用 CHANGELOG 章节当 notes 建 release → 上传 `dist/` 下的包 → 拉回 release 核对字节数。
+token 只从 `$env:GH_TOKEN` 读，不落盘。
+
+> 这轮踩到一个权限坑：GitHub 的细粒度 PAT 如果没有 **Workflows: Read and write**，
+> 任何"改动 `.github/workflows/` 的提交"都会被拒绝推送
+> （`refusing to allow a Personal Access Token to create or update workflow ...`），
+> 与内容是否正确无关。另外本机 `git config http.proxy=127.0.0.1:7897` 会让
+> Git for Windows 的 schannel 握手失败，脚本里改用 `-c http.sslBackend=openssl`。
+
 ### 验证矩阵
 
 | 配置 | 结果 |

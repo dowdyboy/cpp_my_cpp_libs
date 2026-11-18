@@ -422,3 +422,86 @@ jobs:
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
         run: ctest --test-dir build/ci-tsan --output-on-failure
+
+  # ---------------------------------------------------------------- QEMU 真跑 ARM 单测
+  # 上面的 cross job 只验证"能编能链"；这个 job 用 qemu-user 把 armv7 / aarch64 的
+  # 单测**真的跑一遍**（2026-11-18 补：在此之前"5 平台"里的 ARM 只到编译链接）。
+  #
+  # 三个做法要点（都是踩过的坑）：
+  #   1. 产物链接成**全静态**：于是 qemu-*-static 直接执行，不需要 -L <sysroot>。
+  #      本地已用 PetaLinux / ARM GNU 两套工具链验证 readelf -d 输出 "no dynamic section"。
+  #   2. 不注册 binfmt（直接把 qemu-user-static 当解释器用），避免 update-binfmts 的权限问题。
+  #   3. 整包一次跑，不是逐用例 261 个进程 —— qemu 下进程启动开销比测试本身还大。
+  qemu-test:
+    name: QEMU ${{ matrix.target }}（ARM 单测真跑）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: armv7
+            packages: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+            toolchain: cmake/toolchains/linux-armv7-cross.cmake
+            qemu: qemu-arm-static
+          - target: aarch64
+            packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            toolchain: cmake/toolchains/linux-aarch64-cross.cmake
+            qemu: qemu-aarch64-static
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装交叉工具链 + qemu-user
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build qemu-user-static ${{ matrix.packages }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            resources
+            third_party
+          key: deps-linux-${{ hashFiles('scripts/fetch-deps.sh', 'scripts/fetch-deps.ps1', 'resources/README.md') }}
+          restore-keys: deps-linux-
+      - run: bash scripts/fetch-deps.sh
+      - name: Configure（静态链接，qemu 不需要 sysroot）
+        run: |
+          cmake -S . -B build/qemu-${{ matrix.target }} -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=${{ matrix.toolchain }} \
+            -DMYLIB_BUILD_EXAMPLES=OFF \
+            -DMYLIB_BUILD_TOOLS=OFF \
+            -DMYLIB_ENABLE_ONNXRUNTIME=OFF \
+            -DMYLIB_ENABLE_CV=OFF \
+            -DMYLIB_ENABLE_NCNN=OFF \
+            -DCMAKE_EXE_LINKER_FLAGS=-static
+      - name: Build
+        run: cmake --build build/qemu-${{ matrix.target }}
+      - name: 确认产物真的是静态 ELF
+        run: |
+          set -euo pipefail
+          f=build/qemu-${{ matrix.target }}/bin/mylib_tests
+          file "$f"
+          if readelf -d "$f" | grep -q NEEDED; then
+            echo "::error::产物是动态链接的，qemu 下会缺 .so；检查 -static 是否生效"
+            readelf -d "$f"
+            exit 1
+          fi
+          readelf -h "$f" | grep -E 'Machine|Type'
+      - name: 在 qemu 下跑全部单测
+        run: |
+          set -euo pipefail
+          f=build/qemu-${{ matrix.target }}/bin/mylib_tests
+          chmod +x "$f"
+          timeout 2400 ${{ matrix.qemu }} "$f" | tee /tmp/qemu-tests.log
+          echo "---- 汇总 ----"
+          grep -E '^结果:' /tmp/qemu-tests.log
+          # [SKIP] 是允许的（没有 ORT 后端时 ml 的对拍会跳过）；失败用例必须是 0
+          if grep -qE '^结果:.*[1-9][0-9]* 个失败用例' /tmp/qemu-tests.log; then
+            echo "::error::qemu 下有失败用例（见上面的 [FAIL] 行）"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qemu-${{ matrix.target }}-log
+          path: /tmp/qemu-tests.log
+          if-no-files-found: ignore
