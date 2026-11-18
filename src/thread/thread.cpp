@@ -52,6 +52,10 @@ void ThreadPool::worker_loop() {
             tasks_.pop();
         }
         task();
+        // 顺序很重要：先跑任务体（packaged_task 在这一步兑现 promise，等 future 的
+        // 线程会被唤醒），再做 pending_ 自减。所以 future::get() 返回的瞬间 pending()
+        // 可能仍是 1 —— 这是有意的：pending() 表示"还在池子里（含执行中）"，
+        // 而"全部完成"的屏障是 wait_idle()。头文件里写明了这个契约。
         if (pending_.fetch_sub(1) == 1) {
             // 最后一个任务结束：唤醒 wait_idle
             std::lock_guard<std::mutex> lock(mutex_);

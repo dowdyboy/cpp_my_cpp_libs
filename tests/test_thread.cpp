@@ -38,6 +38,11 @@ MYTEST_CASE(thread_pool_runs_all_tasks) {
     for (auto& f : futures) sum += f.get();
     // sum(i^2, i=0..31) = 31*32*63/6 = 10416
     CHECK_EQ(sum, 10416);
+
+    // 注意：f.get() 只保证"任务体已返回"，而 pending_ 是在 packaged_task 兑现 promise
+    // **之后**才自减的 —— 两者之间有一个极小的窗口（第一次跑 CI 时就在这里翻车，见
+    // express: pending()==0）。要做"全部完成"的屏障，用 wait_idle()，别直接断言 pending()==0。
+    CHECK(pool->wait_idle(std::chrono::milliseconds(5000)));
     CHECK_EQ(pool->pending(), std::size_t{0});
 }
 

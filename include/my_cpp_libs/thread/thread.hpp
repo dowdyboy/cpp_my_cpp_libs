@@ -158,11 +158,15 @@ public:
 
     /// 优雅停止：drain=true 先跑完队列，false 直接丢弃未开始的任务（两者都会 join）
     MYLIB_API void shutdown(bool drain = true);
-    /// 等队列清空且任务都跑完；超时返回 false
+    /// 等队列清空且任务都跑完；超时返回 false。
+    /// **这是"全部完成"的唯一可靠屏障**：`future::get()` 只保证任务体已返回，
+    /// 而 pending() 要等 packaged_task 兑现 promise 之后才自减，两者之间有一个极小窗口。
     MYLIB_API bool wait_idle(std::chrono::milliseconds timeout);
 
     MYLIB_API std::size_t size() const noexcept;
-    /// 已提交但未完成的任务数（含正在执行的）
+    /// 已提交但未完成的任务数（含正在执行的）。
+    /// 注意：它降到 0 的时刻**略晚于**最后一个 future 就绪的时刻（见 wait_idle 的说明），
+    /// 想判断"都跑完了"请用 wait_idle()。
     MYLIB_API std::size_t pending() const noexcept;
     MYLIB_API bool        stopping() const noexcept;
 

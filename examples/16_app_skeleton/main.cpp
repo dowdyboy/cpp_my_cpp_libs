@@ -31,12 +31,12 @@
 int main(int argc, char** argv) {
     // ---------------------------------------------------------------- 1. 配置
     my::json::Document defaults;
-    defaults.set("app.name", "skeleton");
-    defaults.set("log.level", "info");
-    defaults.set("log.file", "");
-    defaults.set("worker.count", 2);
-    defaults.set("worker.iterations", 1000);
-    defaults.set("output.path", "skeleton_result.json");
+    (void)defaults.set("app.name", "skeleton");
+    (void)defaults.set("log.level", "info");
+    (void)defaults.set("log.file", "");
+    (void)defaults.set("worker.count", 2);
+    (void)defaults.set("worker.iterations", 1000);
+    (void)defaults.set("output.path", "skeleton_result.json");
 
     my::json::Layered cfg;
     cfg.add_defaults(std::move(defaults));

@@ -46,3 +46,6 @@ __pycache__/
 models/int8/_work/
 models/int8/*_qdq.onnx
 models/int8/summary.json
+# 示例产物（example_app_skeleton 默认写在当前目录）
+skeleton_result.json
+config.json

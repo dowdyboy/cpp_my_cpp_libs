@@ -172,7 +172,10 @@ jobs:
           key: deps-linux-${{ hashFiles('scripts/fetch-deps.sh', 'scripts/fetch-deps.ps1', 'resources/README.md') }}
           restore-keys: deps-linux-
       - run: bash scripts/fetch-deps.sh
-      - name: Configure（只留 core + math + dsp + net）
+      # 子集是 core + math + dsp + net + io + time（0.1.2 起 io/time 也能无异常编译）。
+      # THREAD 必须关：std::thread 构造失败只能靠 std::system_error 上报，
+      # 0.1.2 起它已经进了 fail-closed 名单，漏了这行 configure 会直接 FATAL_ERROR。
+      - name: Configure（只留 core + math + dsp + net + io + time）
         run: |
           cmake -S . -B build/ci-noex -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -182,7 +185,8 @@ jobs:
             -DMYLIB_ENABLE_INFER=OFF \
             -DMYLIB_ENABLE_IMAGE=OFF \
             -DMYLIB_ENABLE_CV=OFF \
-            -DMYLIB_ENABLE_HTTP=OFF
+            -DMYLIB_ENABLE_HTTP=OFF \
+            -DMYLIB_ENABLE_THREAD=OFF
       - name: 确认 -fno-exceptions 真的进了编译命令行
         run: |
           set -e

@@ -9,7 +9,7 @@
         debug     CMAKE_BUILD_TYPE=Debug（断言/前置条件全开；Release 家族都定义 NDEBUG）
         ubsan     MYLIB_SANITIZE=undefined（trap 模式，MinGW 可用）
         minimal   只留 core+log+image，验证组件开关真的能裁剪
-        noex      MYLIB_NO_EXCEPTIONS=ON（core+math+dsp+net 子集），含反向校验
+        noex      MYLIB_NO_EXCEPTIONS=ON（core+math+dsp+net+io+time 子集），含反向校验
         consumer  examples/consumer_app 独立工程：add_subdirectory 嵌入后能编能跑
         sdk       install 之后再 find_package：对应 CI 的 linux-sdk-consumer，验证 SDK 那条腿
         msvc      MSVC 全组件（有 OpenCV 时用例更多）
@@ -57,7 +57,7 @@ $cases = @(
                                  '-DMYLIB_NO_EXCEPTIONS=ON',
                                  '-DMYLIB_ENABLE_LOG=OFF', '-DMYLIB_ENABLE_JSON=OFF',
                                  '-DMYLIB_ENABLE_INFER=OFF', '-DMYLIB_ENABLE_IMAGE=OFF',
-                                 '-DMYLIB_ENABLE_CV=OFF', '-DMYLIB_ENABLE_HTTP=OFF',
+                                 '-DMYLIB_ENABLE_CV=OFF', '-DMYLIB_ENABLE_HTTP=OFF', '-DMYLIB_ENABLE_THREAD=OFF',
                                  "-DCMAKE_CXX_COMPILER=$mingwCxx", "-DCMAKE_MAKE_PROGRAM=$ninja") },
     @{ Name = 'consumer'; Source = 'examples/consumer_app';
        Args = @('-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release',

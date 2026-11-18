@@ -199,16 +199,42 @@ if (($release -or $DryRun) -and $assets.Count -gt 0) {
         if ($DryRun) { Info "[dry-run] 上传 $($f.Name)"; continue }
 
         $url = "https://uploads.github.com/repos/$Repo/releases/$($release.id)/assets?name=$($f.Name)"
-        $json = & curl.exe -sS -X POST `
-            -H "Authorization: Bearer $token" `
-            -H 'Content-Type: application/octet-stream' `
-            -H 'User-Agent: dsh-agent' `
-            --data-binary "@$($f.FullName)" `
-            --max-time 1800 `
-            $url 2>&1
-        if ($LASTEXITCODE -ne 0) { Fail "上传失败（curl exit $LASTEXITCODE）: $json" }
-
-        try { $resp = $json | ConvertFrom-Json } catch { Fail "上传返回无法解析: $json" }
+        # 几十 MB 的包经代理上传时会被 reset（实测 curl 55 "Connection was reset"），
+        # 所以这里带重试；失败后先清掉服务端可能留下的半成品 asset 再重传。
+        $resp = $null
+        for ($attempt = 1; $attempt -le 4; $attempt++) {
+            $json = & curl.exe -sS -X POST `
+                -H "Authorization: Bearer $token" `
+                -H 'Content-Type: application/octet-stream' `
+                -H 'User-Agent: dsh-agent' `
+                --data-binary "@$($f.FullName)" `
+                --max-time 1800 `
+                $url 2>&1
+            $curlExit = $LASTEXITCODE
+            if ($curlExit -eq 0) {
+                try { $resp = $json | ConvertFrom-Json } catch { $resp = $null }
+                if ($resp -and $resp.size -eq $f.Length) { break }
+                Write-Host "  上传后字节数异常（第 $attempt 次）" -ForegroundColor Yellow
+            } else {
+                Write-Host "  上传失败（第 $attempt 次，curl exit $curlExit）: $json" -ForegroundColor Yellow
+            }
+            $resp = $null
+            if ($attempt -eq 4) { Fail "上传重试 4 次仍失败: $($f.Name)" }
+            # 清掉同名半成品（state != uploaded），否则下次会撞名
+            try {
+                $liveAssets = (Invoke-RestMethod -Uri "$apiBase/releases/$($release.id)/assets" -Headers $headers -TimeoutSec 30).assets
+                foreach ($a in $liveAssets) {
+                    if ($a.name -eq $f.Name -and $a.state -ne 'uploaded') {
+                        Invoke-RestMethod -Uri "$apiBase/releases/assets/$($a.id)" -Method Delete -Headers $headers -TimeoutSec 30 | Out-Null
+                        Info "已清理半成品 asset: $($a.name) (state=$($a.state))"
+                    }
+                }
+            } catch {
+                Info "[warn] 清理半成品失败: $($_.Exception.Message)"
+            }
+            Start-Sleep -Seconds 3
+        }
+        if (-not $resp) { Fail "上传没有得到有效响应: $($f.Name)" }
         if ($resp.size -ne $f.Length) {
             Fail "上传后字节数不一致: $($f.Name) 本地=$($f.Length) 远端=$($resp.size)"
         }
