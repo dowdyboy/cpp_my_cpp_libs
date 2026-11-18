@@ -25,20 +25,51 @@
 
 ## 预编译 SDK（`dist/`）
 
-全量包（含 ORT/OpenCV），拿到目录即可 `find_package`：
+全量包（含 ORT/OpenCV），拿到目录即可 `find_package`。**0.1.2 起由 CPack 生成**，
+每个包都带 `share/licenses/`（我们的 MIT + 全部三方原始许可证 + `THIRD_PARTY_NOTICES.md`）。
 
 | 包 | 平台/工具链 | 内含 |
 |---|---|---|
-| `my_cpp_libs-0.1.0-win-x64-msvc.zip` | Windows x64 / MSVC 19.3x | ORT 1.23.2 + OpenCV 4.12（DLL 在 `bin/`） |
-| `my_cpp_libs-0.1.0-linux-armv7-glibc230.tar.gz` | Zynq-7020 / PetaLinux 2020.2（glibc 2.30） | ORT 1.18.1 + OpenCV 4.12 |
-| `my_cpp_libs-0.1.0-linux-aarch64.tar.gz` | Pi 4B / 通用 aarch64（glibc ≥2.40 编译，可跑 2.41） | ORT 1.19.2 + OpenCV 4.12 |
-| `my_cpp_libs-0.1.0-win-x64-mingw-basic.zip` | Windows x64 / MinGW | **基础包**：无 ORT/OpenCV（ABI 不兼容，见 Deps.cmake） |
+| `my_cpp_libs-0.1.2-win-x64-msvc.zip` | Windows x64 / MSVC 19.5x | ORT 1.23.2 + ncnn + OpenCV 4.12（DLL 在 `bin/`） |
+| `my_cpp_libs-0.1.2-win-x64-mingw-basic.zip` | Windows x64 / MinGW GCC 15.2 | **基础包**：无 ORT/OpenCV（ABI 不兼容，见 Deps.cmake） |
+| `my_cpp_libs-0.1.2-linux-armv7-glibc239.tar.gz` | armv7-A 硬浮点（2024 SDK，**glibc ≥ 2.38**） | ORT 1.18.1 + OpenCV 4.12 |
+| `my_cpp_libs-0.1.2-linux-aarch64.tar.gz` | Pi 4B / 通用 aarch64（ARM GNU 14.2，glibc ≈ 2.40） | ORT 1.19.2 + OpenCV 4.12 |
 
 ```cmake
 find_package(my_cpp_libs CONFIG REQUIRED)
 target_link_libraries(app PRIVATE my_cpp_libs::all)
 my_cpp_libs_copy_runtime_dlls(app)   # 仅 Windows
 ```
+
+> **Zynq-7020 / PetaLinux 2020.2（glibc 2.30）怎么办**：上面那个 armv7 包是 2024 SDK
+> （glibc 2.39）编的，**上不了 2.30 的板子**。两种做法：用配套 SDK 在 Linux 上
+> `cmake --preset linux-armv7-sdk2020` 自己编，或者用全静态的
+> `cmake --preset linux-armv7-static`。0.1.0 时手工打过 `glibc230` 包，那个产物不可复现
+> （需要 PetaLinux SDK），所以没有随 0.1.2 重新生成。
+
+### 自己重新打包（可复现）
+
+```powershell
+# Windows / MSVC 全量包
+cmake -S . -B build/pkg-msvc -A x64 -DMYLIB_BUILD_EXAMPLES=OFF -DMYLIB_BUILD_TESTS=OFF `
+      -DMYLIB_BUILD_TOOLS=OFF -DMYLIB_ENABLE_CV=ON -DMYLIB_ENABLE_NCNN=ON `
+      -DMYLIB_PACKAGE_SUFFIX=win-x64-msvc
+cmake --build build/pkg-msvc --config Release
+cpack --config build/pkg-msvc/CPackConfig.cmake -C Release -B dist
+
+# Linux 交叉包（armv7 / aarch64 同理，换 toolchain 与后缀即可）
+cmake -S . -B build/pkg-armv7 -G Ninja `
+      -DCMAKE_MAKE_PROGRAM=<ninja 路径> `
+      -DCMAKE_TOOLCHAIN_FILE=$PWD/cmake/toolchains/linux-armv7-zynq.cmake `
+      -DCMAKE_BUILD_TYPE=Release -DMYLIB_BUILD_EXAMPLES=OFF -DMYLIB_BUILD_TESTS=OFF `
+      -DMYLIB_BUILD_TOOLS=OFF -DMYLIB_ENABLE_CV=ON -DMYLIB_PACKAGE_SUFFIX=linux-armv7-glibc239
+cmake --build build/pkg-armv7
+cpack --config build/pkg-armv7/CPackConfig.cmake -B dist
+```
+
+> 包名后缀是**显式参数**而不是猜出来的：glibc 版本 CMake 推不出来，必须由构建者给，
+> 否则很容易把"能编"误当成"能上板"。打包脚本在缺任何三方许可证时会打印
+> `[pkg] 找不到许可证 ...` —— 出现这行就说明这个包不该发布。
 
 ## 快速开始
 

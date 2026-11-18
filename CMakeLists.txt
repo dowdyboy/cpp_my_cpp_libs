@@ -457,3 +457,12 @@ endif()
 message(STATUS "  Examples/Tests  : ${MYLIB_BUILD_EXAMPLES}/${MYLIB_BUILD_TESTS}")
 message(STATUS "===============================================================")
 message(STATUS "")
+
+
+# -----------------------------------------------------------------------------
+# 打包（CPack）—— 必须在所有 install() 规则和配置摘要之后 include
+#   cmake --build <build> --target package   →  dist/ 里可复现的 SDK 包
+# -----------------------------------------------------------------------------
+if(MYLIB_INSTALL)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/Packaging.cmake")
+endif()
