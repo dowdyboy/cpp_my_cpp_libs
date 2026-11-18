@@ -39,7 +39,9 @@ param(
     [switch] $DryRun
 )
 
-$ErrorActionPreference = 'Stop'
+# PS 5.1 的坑：$ErrorActionPreference='Stop' 会把原生命令（git/curl）写到 stderr 的正常输出
+# 当成终止错误（NativeCommandError）。所以用 Continue，错误一律靠 $LASTEXITCODE 和 try/catch 判。
+$ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
@@ -105,10 +107,11 @@ if (-not $SkipPush) {
             Info "远端已有 $Tag，跳过推送"
             $pushOk = $true
         } else {
-            $out = git -c credential.helper= -c http.sslBackend=openssl push $gitUrl "refs/heads/main:refs/heads/main" "refs/tags/$Tag" 2>&1
+            $out = & git -c credential.helper= -c http.sslBackend=openssl push $gitUrl "refs/heads/main:refs/heads/main" "refs/tags/$Tag" 2>&1
+            $gitExit = $LASTEXITCODE
             $out = $out | ForEach-Object { $_ -replace [regex]::Escape($token), '***' }
             $out | ForEach-Object { Info $_ }
-            if ($LASTEXITCODE -eq 0) {
+            if ($gitExit -eq 0) {
                 $pushOk = $true
             } elseif (($out -join "`n") -match 'workflow') {
                 Write-Host ""
@@ -121,7 +124,7 @@ if (-not $SkipPush) {
                 Write-Host "    b) 用带 workflow scope 的 classic token 重新执行本脚本" -ForegroundColor Yellow
                 exit 3
             } else {
-                Fail "git push 失败（见上面的输出）"
+                Fail "git push 失败（exit=$gitExit，见上面的输出）"
             }
         }
     }
