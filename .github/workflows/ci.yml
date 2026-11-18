@@ -159,7 +159,7 @@ jobs:
   #   2) 编译器命令行里真的出现了 -fno-exceptions；
   #   3) 和 json 同开时**必须** configure 失败（fail-closed，不允许静默降级）。
   linux-noexceptions:
-    name: Linux / -fno-exceptions（core + math + dsp + net）
+    name: Linux / -fno-exceptions（core+math+dsp+net+io+time）
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
