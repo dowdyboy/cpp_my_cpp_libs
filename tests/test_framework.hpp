@@ -170,6 +170,9 @@ inline int run(const RunOptions& opt) {
         const int before_skip = skips();
         ++ran;
         std::printf("[ RUN  ] %s\n", c.name);
+        // 立刻 flush：stdout 重定向到文件时是块缓冲，用例一旦挂住/被 kill，
+        // 缓冲区里的内容会丢，日志里就只剩"上一条"——根本看不出是哪个用例卡的。
+        std::fflush(stdout);
         try {
             c.fn();
         } catch (const std::exception& e) {

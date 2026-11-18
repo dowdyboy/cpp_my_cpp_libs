@@ -1,8 +1,24 @@
 #include "my_cpp_libs/json/json.hpp"
 
+#include "my_cpp_libs/json/config.hpp"  // merge_into / document_from_env / Layered
+
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <string>
+
+// 环境变量表：三个平台的取法都不一样，这里统一声明一次。
+//   POSIX  : extern char** environ（<unistd.h> 里已有声明）
+//   MinGW  : _environ
+//   MSVC   : __p__environ() 返回 char***
+#if defined(_WIN32)
+extern "C" char** _environ;
+#  if defined(_MSC_VER)
+extern "C" char*** __p__environ(void);
+#  endif
+#else
+#  include <unistd.h>
+#endif
 
 namespace my::json {
 
@@ -121,4 +137,153 @@ std::vector<std::string> Document::keys(std::string_view path) const {
     return out;
 }
 
+// =============================================================================
+//  分层配置（json/config.hpp）
+// =============================================================================
+namespace {
+
+/// 深合并：对象递归，数组/标量整体替换
+void merge_json(Json& base, const Json& overlay) {
+    if (base.is_object() && overlay.is_object()) {
+        for (auto it = overlay.begin(); it != overlay.end(); ++it) {
+            auto at = base.find(it.key());
+            if (at != base.end()) {
+                merge_json(*at, it.value());
+            } else {
+                base[it.key()] = it.value();
+            }
+        }
+        return;
+    }
+    base = overlay;
+}
+
+/// 尽量按 JSON 解析值；失败就当字符串（配置文件里写 8080 / true / "abc" 都自然）
+Json parse_scalar_or_string(const std::string& text) {
+    auto doc = Document::parse(text);
+    if (doc) return doc.value().raw();
+    return Json(text);
+}
+
+/// 环境变量表。三个平台取法不同，都拿失败也行（返回空表即可）。
+char** environ_table() noexcept {
+#if defined(_MSC_VER)
+    return *__p__environ();
+#elif defined(_WIN32)
+    return _environ;
+#else
+    return environ;
+#endif
+}
+
+}  // namespace
+
+Status merge_into(Document& base, const Document& overlay) {
+    try {
+        merge_json(base.raw(), overlay.raw());
+        return Ok();
+    } catch (const std::exception& e) {
+        return Status(Errc::RuntimeError, std::string("配置合并失败: ") + e.what());
+    }
+}
+
+Status document_from_env(const std::string& prefix, Document& out) {
+    if (prefix.empty()) {
+        return Status(Errc::InvalidArgument, "环境变量前缀为空");
+    }
+    const std::string head = prefix + "__";
+
+    Document layer;
+    char**   env = environ_table();
+    if (env == nullptr) {
+        out = std::move(layer);
+        return Ok();
+    }
+
+    for (char** cur = env; *cur != nullptr; ++cur) {
+        const std::string entry(*cur);
+        const auto        eq = entry.find('=');
+        if (eq == std::string::npos) continue;
+        if (entry.size() < head.size() || entry.compare(0, head.size(), head) != 0) continue;
+
+        const std::string raw_key = entry.substr(head.size(), eq - head.size());
+        if (raw_key.empty()) continue;
+        const std::string value_text = entry.substr(eq + 1);
+
+        // SERVER__PORT -> server.port
+        std::string path;
+        path.reserve(raw_key.size());
+        for (std::size_t i = 0; i < raw_key.size(); ++i) {
+            if (raw_key[i] == '_' && i + 1 < raw_key.size() && raw_key[i + 1] == '_') {
+                path.push_back('.');
+                ++i;
+                continue;
+            }
+            char c = raw_key[i];
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            path.push_back(c);
+        }
+        if (path.empty()) continue;
+
+        if (auto st = layer.set(path, parse_scalar_or_string(value_text)); !st) {
+            return Status(st.code(), "环境变量 " + entry.substr(0, eq) + " 无法映射: " + st.message());
+        }
+    }
+
+    out = std::move(layer);
+    return Ok();
+}
+
+Status document_from_argv(int argc, const char* const* argv, Document& out, int start_index) {
+    if (argv == nullptr || argc <= start_index) {
+        out = Document();
+        return Ok();
+    }
+
+    Document layer;
+    for (int i = start_index; i < argc; ++i) {
+        const std::string_view arg(argv[i]);
+        if (arg.size() < 3 || arg[0] != '-' || arg[1] != '-') continue;  // 不是长选项
+
+        std::string_view rest = arg.substr(2);
+        std::string_view key;
+        std::string_view value;
+        const auto       eq = rest.find('=');
+        bool             has_value = false;
+        if (eq != std::string_view::npos) {
+            key       = rest.substr(0, eq);
+            value     = rest.substr(eq + 1);
+            has_value = true;
+        } else {
+            key = rest;
+            // --key value：下一个参数不是选项时当作值
+            if (i + 1 < argc) {
+                const std::string_view next(argv[i + 1]);
+                if (next.size() < 2 || next[0] != '-' || next[1] != '-') {
+                    value     = next;
+                    has_value = true;
+                    ++i;
+                }
+            }
+        }
+        if (key.empty()) continue;
+
+        const std::string key_str(key);
+        if (auto st = layer.set(key_str, has_value ? parse_scalar_or_string(std::string(value))
+                                                   : Json(true));
+            !st) {
+            return Status(st.code(), "命令行参数 --" + key_str + " 无法解析: " + st.message());
+        }
+    }
+
+    out = std::move(layer);
+    return Ok();
+}
+
+bool Layered::io_exists(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    return static_cast<bool>(in);
+}
+
 }  // namespace my::json
+

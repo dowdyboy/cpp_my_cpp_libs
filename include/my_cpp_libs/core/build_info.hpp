@@ -38,6 +38,11 @@ struct BuildInfo {
     /// 编译期是否在交叉编译
     static bool isCrossCompiled() noexcept;
 
+    /// 本构建是否开着 C++ 异常。
+    /// -DMYLIB_NO_EXCEPTIONS=ON 时为 false：此时标了 noexcept 的路径不能依赖
+    /// try/catch 兜底（比如 ScopedTimer 的回调抛异常会直接 terminate）。
+    static bool hasExceptions() noexcept;
+
     /// 指针位宽：32 / 64
     static int pointerBits() noexcept;
 

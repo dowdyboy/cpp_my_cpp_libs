@@ -1,5 +1,68 @@
 # 变更记录
 
+## 0.1.2（2026-11-18）—— 工程底座：io / time / thread / 分层配置
+
+0.1.1 把安全网补上之后，这一版开始按 roadmap 的 P1 顺序补组件。四个都只依赖标准库
+（`io`/`time` 还进了 `-fno-exceptions` 子集），目标是消除"每个工程都重写一遍、而且
+每次重写都会踩同一个坑"的那部分代码。
+
+### 新组件
+
+| 组件 | target | 解决的问题 | 关键点 |
+|---|---|---|---|
+| `my::io` | `my_cpp_libs::io` | 文件/目录/路径/临时文件 | **`write_file` 是原子的**（临时文件 + rename）；全部走 `error_code` 重载，不抛异常 |
+| `my::time` | `my_cpp_libs::time` | 时钟、时间戳、计时 | 单调时钟测耗时、UTC 格式化、`Stopwatch`/`ScopedTimer` |
+| `my::thread` | `my_cpp_libs::thread` | 线程池/阻塞队列/周期任务 | 析构必 drain+join；有界队列；`PeriodicTask` 固定速率不追补 |
+| `my::json::Layered` | 复用 `my_cpp_libs::json` | 分层配置 | 默认值 ← 文件 ← 环境变量 ← 命令行；对象深合并、数组整体覆盖 |
+
+分层配置**没有**独立 target：它就是"JSON 的深合并"，独立组件只会多一层类型转换。
+详见 [docs/11](docs/11-基础组件.md)。
+
+### 修掉的并发缺陷（测试抓到的）
+
+`my::thread::ThreadPool::shutdown()`（以及析构函数）在**锁外**置位 `stopping_`，
+与工作线程的条件变量等待之间存在**丢失唤醒**窗口：
+
+```
+worker: 持锁判谓词(假) → 释放锁 → 尚未进入 cond_wait 的注册
+main  : 锁外 stopping_=true → notify_all()  ← 通知落在"注册之前"，被丢弃
+worker: 睡下；谓词已是 true，但再没有人叫醒它 → join 永久阻塞
+```
+
+实测约 5~25% 概率整个进程挂死（ctest 报 300s 超时）。用 gdb 附加抓到确凿栈：
+worker 停在 `work_cv_.wait`、主线程停在 `shutdown()` 的 `join`。
+修法是标准写法：**改状态和 notify 必须与等待方共用同一把 mutex**。
+修完之后同一用例连跑 200 次、全量连跑 3 轮均无挂起。
+
+### 顺带
+
+- `BuildInfo::hasExceptions()`：`-fno-exceptions` 构建可以据此跳过"回调抛异常要被吞掉"
+  这类只有异常开启时才有意义的用例；`summary()` 也会打上 `| no-exceptions`。
+- `ScopedTimer` 的析构按"异常是否开启"裁剪 try/catch（否则 `-fno-exceptions` 编不过）。
+- 测试框架：`[ RUN ]` 之后 `fflush(stdout)` —— 重定向到文件时是块缓冲，用例一旦挂住
+  被 kill，日志里连"是哪个用例"都看不到（这次排查就吃了这个亏）。
+- `my_cpp_libs.hpp` 汇总头、SDK 的 Config、`ci-local.ps1`、`tests/sdk_consumer` 均已覆盖新组件。
+
+### 规模
+
+- 新增 52 个用例：io 13 / time 11 / thread 16 / config 12，总用例 199 → **251**。
+- 新增示例 `example_app_skeleton`：配置 → 日志 → 线程池 → 周期任务 → 原子写，
+  五个组件串起来的"最小可用服务骨架"。
+
+### 验证矩阵（实测）
+
+| 配置 | 结果 |
+|---|---|
+| MinGW x64 Release | **253/253**（251 用例 + 2 守卫），连跑 3 轮无挂起 |
+| MSVC x64 Release（ORT + ncnn + OpenCV 4.12） | **261/261**（251 + cv 8 + 2），带 `--fail-on-skip` |
+| Linux gcc **Debug**（断言全开） | **253/253** |
+| Linux ASan（Debug + 泄漏检测） | 251 用例 0 失败（8 个 ml 显式跳过） |
+| Linux **TSan** | **253/253，无数据竞争报告**（0.1.2 开发中它先抓到了用例自己的 `raw` 指针竞争） |
+| `-fno-exceptions`（core+math+dsp+net+**io**+**time**） | **114/114**，`-fno-exceptions` 确在命令行、`libmy_cpp_libs_io.a` 编出来了 |
+| 最小配置（只留 core） | 只出 1 个静态库 |
+| `install` → `find_package`（外部工程） | 编译 + **运行**通过，`io/time/thread` 已随 SDK 导出 |
+| `example_app_skeleton` | 跑通：配置 3 层合并、线程池批处理 ~0.4 ms、周期任务 3 次心跳、结果原子写盘 |
+
 ## 0.1.1（2026-11-17）—— 缺陷修复 + 测试可信度 + CI 补全
 
 这一版**没有新功能**，全部是"把已有的东西弄对"。起因是一次全量评估：构建和 158 个用例

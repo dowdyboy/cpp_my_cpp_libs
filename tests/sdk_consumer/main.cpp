@@ -8,12 +8,18 @@
 #include <my_cpp_libs/core/build_info.hpp>
 #include <my_cpp_libs/core/status.hpp>
 #include <my_cpp_libs/dsp/dsp.hpp>
+#include <my_cpp_libs/io/io.hpp>
+#include <my_cpp_libs/json/config.hpp>
 #include <my_cpp_libs/json/json.hpp>
 #include <my_cpp_libs/log/log.hpp>
 #include <my_cpp_libs/net/net.hpp>
+#include <my_cpp_libs/thread/thread.hpp>
+#include <my_cpp_libs/time/time.hpp>
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 namespace {
@@ -78,6 +84,29 @@ int main() {
     expect(!ep.value().empty(), "endpoint 非空");
 
     my::log::shutdown();
+
+    // ---- io / time / thread（0.1.2 新增组件的 SDK 可见性）----
+    const std::string tmp_file = "sdk_consumer_roundtrip.txt";
+    expect(static_cast<bool>(my::io::write_file(tmp_file, "sdk")), "io::write_file 成功");
+    auto back = my::io::read_file(tmp_file);
+    expect(static_cast<bool>(back) && back.value() == "sdk", "io::read_file 读回一致");
+    expect(static_cast<bool>(my::io::remove(tmp_file)), "io::remove 成功");
+
+    my::time::Stopwatch watch;
+    my::time::sleep_ms(5);
+    expect(watch.elapsed_ms() >= 2.0, "Stopwatch 测到耗时");
+
+    auto pool = my::thread::ThreadPool::create(2);
+    expect(static_cast<bool>(pool), "ThreadPool 创建成功");
+    if (pool) {
+        std::atomic<int> hits{0};
+        for (int i = 0; i < 8; ++i) {
+            (void)pool.value()->submit([&hits] { hits.fetch_add(1); });
+        }
+        expect(pool.value()->wait_idle(std::chrono::milliseconds(5000)), "线程池任务完成");
+        expect(hits.load() == 8, "线程池执行了全部任务");
+        pool.value()->shutdown();
+    }
 
     if (failures != 0) {
         std::printf("SDK 消费方验证失败: %d 项\n", failures);

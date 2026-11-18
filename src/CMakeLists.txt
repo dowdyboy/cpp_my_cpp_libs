@@ -10,6 +10,13 @@ if(CMAKE_CROSSCOMPILING)
 else()
     set(MYLIB_CROSS_COMPILED_INT 0)
 endif()
+# 本构建是否开异常：BuildInfo::hasExceptions() 用它，测试据此跳过
+# "回调抛异常要被吞掉"这类只有异常开启时才有意义的用例
+if(MYLIB_NO_EXCEPTIONS)
+    set(MYLIB_HAS_EXCEPTIONS_INT 0)
+else()
+    set(MYLIB_HAS_EXCEPTIONS_INT 1)
+endif()
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/core/build_info_config.h.in"
     "${CMAKE_CURRENT_BINARY_DIR}/generated/my_cpp_libs/build_info_config.h"
@@ -19,6 +26,37 @@ set(_core_sources core/status.cpp core/build_info.cpp)
 mylib_add_component(core SOURCES ${_core_sources})
 target_include_directories(mylib_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 list(APPEND MYLIB_TARGETS mylib_core)
+
+# ---------------------------------------------------------------- io
+# 文件/目录/路径/临时文件。全部走 std::filesystem 的 error_code 重载，不抛异常，
+# 所以能进 -fno-exceptions 子集。write_file 是原子的（临时文件 + rename）。
+if(MYLIB_ENABLE_IO)
+    mylib_add_component(io
+        SOURCES io/io.cpp
+        LINK mylib_core)
+    target_compile_definitions(mylib_io PUBLIC MYLIB_ENABLE_IO_COMPONENT=1)
+    list(APPEND MYLIB_TARGETS mylib_io)
+endif()
+
+# ---------------------------------------------------------------- time
+# 单调时钟 / 时间戳格式化 / 计时器。只有标准库依赖。
+if(MYLIB_ENABLE_TIME)
+    mylib_add_component(time
+        SOURCES time/time.cpp
+        LINK mylib_core)
+    target_compile_definitions(mylib_time PUBLIC MYLIB_ENABLE_TIME_COMPONENT=1)
+    list(APPEND MYLIB_TARGETS mylib_time)
+endif()
+
+# ---------------------------------------------------------------- thread
+# 线程池 / 阻塞队列 / 周期任务。Threads::Threads 由 mylib_platform 统一带下来。
+if(MYLIB_ENABLE_THREAD)
+    mylib_add_component(thread
+        SOURCES thread/thread.cpp
+        LINK mylib_core)
+    target_compile_definitions(mylib_thread PUBLIC MYLIB_ENABLE_THREAD_COMPONENT=1)
+    list(APPEND MYLIB_TARGETS mylib_thread)
+endif()
 
 # ---------------------------------------------------------------- log
 if(MYLIB_ENABLE_LOG)

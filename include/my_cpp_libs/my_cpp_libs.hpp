@@ -10,12 +10,26 @@
 #include "my_cpp_libs/core/build_info.hpp"
 #include "my_cpp_libs/core/status.hpp"
 
+// 0.1.2 的三个工程底座组件（都只依赖 core，可进 -fno-exceptions 子集的只有 io/time）
+#if defined(MYLIB_ENABLE_IO_COMPONENT)
+#  include "my_cpp_libs/io/io.hpp"
+#endif
+
+#if defined(MYLIB_ENABLE_TIME_COMPONENT)
+#  include "my_cpp_libs/time/time.hpp"
+#endif
+
+#if defined(MYLIB_ENABLE_THREAD_COMPONENT)
+#  include "my_cpp_libs/thread/thread.hpp"
+#endif
+
 #if defined(MYLIB_ENABLE_LOG_COMPONENT)
 #  include "my_cpp_libs/log/log.hpp"
 #endif
 
 #if defined(MYLIB_ENABLE_JSON_COMPONENT)
 #  include "my_cpp_libs/json/json.hpp"
+#  include "my_cpp_libs/json/config.hpp"  // 分层配置（不单独成组件）
 #endif
 
 #if defined(MYLIB_ENABLE_MATH_COMPONENT)

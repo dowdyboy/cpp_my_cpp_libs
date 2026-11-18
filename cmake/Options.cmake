@@ -39,6 +39,15 @@ option(MYLIB_ENABLE_HTTP  "HTTP 组件（客户端+服务端，封装 cpp-httpli
 option(MYLIB_ENABLE_IMAGE "图像组件（stb_image 解码/缩放/预处理，不依赖 OpenCV）" ON)
 option(MYLIB_ENABLE_CV    "图像组件（封装 OpenCV）"             OFF)
 
+# 0.1.2 补的"工程底座"三个组件。都只依赖 core 与标准库：
+#   io     : std::filesystem + 原子写（不抛异常，用 error_code 重载）
+#   time   : 单调时钟/时间戳/计时
+#   thread : 线程池/阻塞队列/周期任务
+# 分层配置（my::json::Layered）不单独成组件，直接长在 json 上（见 json/config.hpp）。
+option(MYLIB_ENABLE_IO     "IO 组件（文件/目录/路径/临时文件，原子写）" ON)
+option(MYLIB_ENABLE_TIME   "时间组件（单调时钟/时间戳格式化/计时器）"   ON)
+option(MYLIB_ENABLE_THREAD "线程组件（线程池/阻塞队列/周期任务）"       ON)
+
 # ncnn / OpenCV 的手工路径（留空则自动在 third_party 里找）
 set(MYLIB_NCNN_ROOT "" CACHE PATH "ncnn 安装根目录（含 include/ncnn 与 lib）")
 set(MYLIB_OPENCV_ROOT "" CACHE PATH "OpenCV 安装根目录（含 OpenCVConfig.cmake）")
@@ -102,7 +111,9 @@ add_library(my_cpp_libs::noexcept ALIAS mylib_noexcept)
 
 if(MYLIB_NO_EXCEPTIONS)
     set(_noex_blocked "")
-    foreach(_comp LOG JSON INFER CV IMAGE HTTP)
+    # thread 不在子集里：std::thread 构造失败靠 std::system_error 上报，
+    # 关掉异常就只能 abort（和"错误必须可返回"的契约冲突）。
+    foreach(_comp LOG JSON INFER CV IMAGE HTTP THREAD)
         if(MYLIB_ENABLE_${_comp})
             list(APPEND _noex_blocked "${_comp}")
         endif()
@@ -111,17 +122,18 @@ if(MYLIB_NO_EXCEPTIONS)
     if(_noex_blocked)
         string(REPLACE ";" " / " _noex_str "${_noex_blocked}")
         message(FATAL_ERROR
-            "mylib-noex-conflict: MYLIB_NO_EXCEPTIONS=ON 目前只支持 core + math + dsp + net，以下组件还开着：${_noex_str}\n"
+            "mylib-noex-conflict: MYLIB_NO_EXCEPTIONS=ON 目前只支持 core + math + dsp + net + io + time，以下组件还开着：${_noex_str}\n"
             "\n"
-            "原因：这些组件用异常上报错误（nlohmann / ONNX Runtime / OpenCV / spdlog），\n"
-            "      关掉异常后只能退化成 abort()，会破坏 Status/Result 的契约。\n"
+            "原因：这些组件用异常上报错误（nlohmann / ONNX Runtime / OpenCV / spdlog /\n"
+            "      std::thread），关掉异常后只能退化成 abort()，会破坏 Status/Result 的契约。\n"
             "      取舍与真值表见 docs/07-图像链路与无异常构建.md\n"
             "\n"
             "可用的最小配置：\n"
             "  -DMYLIB_NO_EXCEPTIONS=ON \\\n"
             "  -DMYLIB_ENABLE_LOG=OFF -DMYLIB_ENABLE_JSON=OFF \\\n"
             "  -DMYLIB_ENABLE_INFER=OFF -DMYLIB_ENABLE_IMAGE=OFF -DMYLIB_ENABLE_CV=OFF \\\n"
-            "  -DMYLIB_ENABLE_HTTP=OFF")
+            "  -DMYLIB_ENABLE_HTTP=OFF -DMYLIB_ENABLE_THREAD=OFF\n"
+            "  （io 与 time 可以留着：它们只用 error_code 重载与 chrono，不抛异常）")
     endif()
 
     target_compile_definitions(mylib_noexcept INTERFACE MYLIB_NO_EXCEPTIONS=1)

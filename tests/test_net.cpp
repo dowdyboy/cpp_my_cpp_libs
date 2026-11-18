@@ -51,7 +51,7 @@ struct EchoServer {
             }
             conns = 1;
             // 给连接设超时：客户端异常时线程不会永久阻塞在 recv 上（否则析构 join 会挂死）
-            c.value().set_timeout(3000);
+            CHECK_OK(c.value().set_timeout(3000));
             std::uint8_t buf[4096];
             while (true) {
                 auto r = c.value().recv(buf, sizeof(buf));
@@ -165,7 +165,7 @@ MYTEST_CASE(net_tcp_peer_close_is_zero) {
 
     auto cli = my::net::TcpSocket::connect({"127.0.0.1", l.value().port()}, 3000);
     CHECK_RESULT(cli);
-    cli.value().set_timeout(1000);
+    CHECK_OK(cli.value().set_timeout(1000));
 
     // 对端关闭后，recv 返回 0（而不是错误）
     std::uint8_t buf[16];
@@ -188,7 +188,7 @@ MYTEST_CASE(net_tcp_send_after_peer_close_does_not_crash) {
 
     auto cli = my::net::TcpSocket::connect({"127.0.0.1", l.value().port()}, 3000);
     CHECK_RESULT(cli);
-    cli.value().set_timeout(300);
+    CHECK_OK(cli.value().set_timeout(300));
 
     if (peer.t.joinable()) peer.t.join();   // 先确保对端真的关了，再往死连接写
     std::this_thread::sleep_for(100ms);
@@ -249,8 +249,8 @@ struct SocketPair {
 
         p.a = std::move(client.value());
         p.b = std::move(server.value());
-        p.a.set_timeout(2000);
-        p.b.set_timeout(2000);
+        (void)p.a.set_timeout(2000);  // make() 返回 Result，这里不能提前 return
+        (void)p.b.set_timeout(2000);
         return p;
     }
     SocketPair() = default;

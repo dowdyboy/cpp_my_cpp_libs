@@ -15,7 +15,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(my_cpp_libs
-    VERSION 0.1.1
+    VERSION 0.1.2
     DESCRIPTION "Unified cross-platform C++ wrapper over third-party open-source libraries"
     LANGUAGES CXX)
 
@@ -299,6 +299,9 @@ if(MYLIB_INSTALL)
     # 每个组件在 SDK 里要额外链接什么（对应 src/CMakeLists 里的 PUBLIC 依赖）
     set(_mylib_sdk_link_core       "")
     set(_mylib_sdk_link_log        "my_cpp_libs::deps_spdlog")
+    set(_mylib_sdk_link_io         "")
+    set(_mylib_sdk_link_time       "")
+    set(_mylib_sdk_link_thread     "")
     set(_mylib_sdk_link_json       "my_cpp_libs::deps_nlohmann")
     set(_mylib_sdk_link_math       "my_cpp_libs::deps_eigen")
     set(_mylib_sdk_link_dsp        "")
@@ -320,7 +323,7 @@ if(MYLIB_INSTALL)
     endif()
 
     unset(_sdk_components_code)
-    foreach(_c core log json math infer preprocess image dsp ml net http cv)
+    foreach(_c core io time thread log json math infer preprocess image dsp ml net http cv)
         if(TARGET mylib_${_c})
             string(APPEND _sdk_components_code
                 "_mylib_sdk_add_component(${_c} \"${_mylib_sdk_link_${_c}}\")\n")
@@ -329,7 +332,7 @@ if(MYLIB_INSTALL)
     set(MYLIB_SDK_COMPONENTS_BLOCK "${_sdk_components_code}")
 
     set(_sdk_all_links "")
-    foreach(_c core log json math infer preprocess image dsp ml net http cv)
+    foreach(_c core io time thread log json math infer preprocess image dsp ml net http cv)
         if(TARGET mylib_${_c})
             list(APPEND _sdk_all_links "my_cpp_libs::${_c}")
         endif()
@@ -425,7 +428,7 @@ endif()
 # 原来 core/log/json/math/infer 打印的是 MYLIB_ENABLE_xxx，于是"选项开着但组件因为
 # 缺依赖被跳过"时摘要仍然显示 ON —— 摘要存在的意义就是回答"到底编了什么"。
 set(_components_desc "")
-foreach(_c core log json math infer image dsp ml net http cv)
+foreach(_c core io time thread log json math infer image dsp ml net http cv)
     if(TARGET mylib_${_c})
         string(APPEND _components_desc " ${_c}=ON")
     else()

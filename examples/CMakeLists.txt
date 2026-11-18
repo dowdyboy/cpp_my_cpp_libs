@@ -117,3 +117,10 @@ if(TARGET deps::ncnn)
     mylib_add_example(example_native_ncnn SOURCES 14_native_ncnn/main.cpp
         LINK deps::ncnn)
 endif()
+
+# 工程骨架：配置 → 日志 → 线程池 → 计时 → 原子写，五个组件串起来的样子。
+# 少任何一环都不再是"可运行的骨架"，所以四个组件必须同时存在。
+if(TARGET mylib_log AND TARGET mylib_json AND TARGET mylib_io AND TARGET mylib_time AND TARGET mylib_thread)
+    mylib_add_example(example_app_skeleton SOURCES 16_app_skeleton/main.cpp
+        LINK mylib_log mylib_json mylib_io mylib_time mylib_thread mylib_core)
+endif()

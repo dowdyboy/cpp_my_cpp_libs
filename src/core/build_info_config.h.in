@@ -12,3 +12,8 @@
 #define MYLIB_TARGET_TRIPLE_STR "@MYLIB_TARGET_TRIPLE@"
 #define MYLIB_GIT_COMMIT_STR "@MYLIB_GIT_COMMIT@"
 #define MYLIB_CROSS_COMPILED @MYLIB_CROSS_COMPILED_INT@
+
+// 本构建是否开着 C++ 异常（-fno-exceptions 时为 0）。
+// 用途：调用方可以据此决定"要不要依赖 try/catch"，测试也可以据此跳过
+// 只有在异常开启时才有意义的用例。
+#define MYLIB_HAS_EXCEPTIONS @MYLIB_HAS_EXCEPTIONS_INT@

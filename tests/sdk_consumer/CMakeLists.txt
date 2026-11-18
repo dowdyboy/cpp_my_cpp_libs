@@ -17,6 +17,9 @@ find_package(my_cpp_libs CONFIG REQUIRED)
 add_executable(sdk_consumer main.cpp)
 target_link_libraries(sdk_consumer PRIVATE
     my_cpp_libs::core
+    my_cpp_libs::io
+    my_cpp_libs::time
+    my_cpp_libs::thread
     my_cpp_libs::log
     my_cpp_libs::json
     my_cpp_libs::dsp
