@@ -424,7 +424,9 @@ jobs:
         run: cmake --build build/ci-tsan
       - name: Test
         env:
-          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+          # tests/tsan.supp 只抑制 spdlog 异步销毁路径这一类已知安全模式（见文件内的说明），
+          # 我们自己的代码不抑制任何东西。
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1:suppressions=${{ github.workspace }}/tests/tsan.supp
         run: ctest --test-dir build/ci-tsan --output-on-failure
 
   # ---------------------------------------------------------------- QEMU 真跑 ARM 单测

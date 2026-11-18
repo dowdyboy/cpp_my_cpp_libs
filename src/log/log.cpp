@@ -1,9 +1,11 @@
 #include "my_cpp_libs/log/log.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <spdlog/async.h>
@@ -168,13 +170,25 @@ void shutdown() {
         st.initialized = false;
     }
     try {
-        if (logger) {
-            logger->flush();
-            logger.reset();
-        }
+        if (logger) logger->flush();
     } catch (...) {
         // 关闭路径不允许抛出
     }
+    // 等异步队列排空再释放 logger。
+    //
+    // 队列里残留的 async_msg **各自持有一份 logger 的 shared_ptr**（spdlog 的实现），
+    // 所以"主线程 reset logger"和"worker 线程析构最后一条消息"会并发碰到同一个对象：
+    // 最后一个引用由谁释放不确定。shared_ptr 的引用计数是原子的（标准保证安全），
+    // 但 TSan 会把它报成 "atomic 减引用 vs operator delete" 的 race —— CI 的
+    // linux-tsan 在 log_async_roundtrip 上就报过一次。
+    // spdlog 没有"停止"接口（post_async_msg_ 是私有的），只能按 queue_size() 做有界等待，
+    // 把窗口压到最小；剩下的窄口子在 tests/tsan.supp 里做**针对性**抑制。
+    if (pool) {
+        for (int i = 0; i < 500 && pool->queue_size() > 0; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    logger.reset();
     // 只回收本库自己创建的线程池。
     // 这里**不能**调 spdlog::shutdown()：那是进程级操作，会把宿主自己
     // register_logger() 过的 logger 和全局线程池一起清掉。

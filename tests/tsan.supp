@@ -1,0 +1,22 @@
+# ThreadSanitizer 抑制清单（CI 的 linux-tsan job 使用）
+#
+# 原则：**只抑制第三方库的已知安全模式**，我们自己的代码一条都不抑制。
+# 每加一条都要写清楚"为什么它不是真问题"，否则这个文件会变成掩盖 bug 的地方。
+
+# spdlog 异步日志的销毁路径。
+#
+# 现象（CI 里 log_async_roundtrip 报过一次）：
+#   WARNING: ThreadSanitizer: data race
+#     Write of size 8 ... operator delete            <- worker 线程
+#     Previous atomic write of size 4 ... _M_release <- 主线程 my::log::shutdown()
+#   栈里有 spdlog::details::async_msg::~async_msg() / thread_pool::process_next_msg_()
+#
+# 原因：队列里的每条 async_msg 都持有一份 std::shared_ptr<spdlog::async_logger>。
+# shutdown() 释放自己那份时，队列里可能还有残留消息；最后一份引用由 worker 线程释放，
+# 于是"原子递减引用计数"和"operator delete"发生在两个线程上。shared_ptr 的计数本身
+# 是原子的、由标准保证安全，但 TSan 把它判成 race（libstdc++ 的 _M_release 实现细节）。
+#
+# my::log::shutdown() 已经先按 queue_size() 做有界排空来缩小窗口；剩下的这条窄口子
+# 属于 spdlog 的销毁路径，故按栈帧抑制，而不是按文件/函数全禁。
+race:async_msg
+race:spdlog::details::thread_pool

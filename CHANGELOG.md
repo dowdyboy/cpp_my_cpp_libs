@@ -85,6 +85,38 @@ token 只从 `$env:GH_TOKEN` 读，不落盘。
 > 与内容是否正确无关。另外本机 `git config http.proxy=127.0.0.1:7897` 会让
 > Git for Windows 的 schannel 握手失败，脚本里改用 `-c http.sslBackend=openssl`。
 
+### 5. 发布后发现并修掉的问题（同版补充）
+
+v0.1.3 推上去之后 CI 首跑 12/14 绿（两个 QEMU job 都过了），两个红，都已定位：
+
+| job | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| `linux-noexceptions` | Configure 阶段 FATAL_ERROR | 0.1.2 起 `THREAD` 进了 fail-closed 名单，但 CI / `ci-local.ps1` / `docs/03` 的示例命令还停在旧参数（只关到 `HTTP=OFF`） | 三处补 `-DMYLIB_ENABLE_THREAD=OFF`，标题同步成 core+math+dsp+net+io+time |
+| `linux-ubsan` | `thread_pool_runs_all_tasks` 0.00s 失败 | **测试断言了库并不保证的性质**：`f.get()` 只保证任务体返回，`pending_` 要等 packaged_task 兑现 promise 之后才自减 | 测试改用 `wait_idle()` 做屏障；头文件写明"`wait_idle()` 才是全部完成的可靠屏障"；worker_loop 加注释防误改 |
+
+第二次跑 TSan 又抓到一条（时好时坏）：
+
+```
+WARNING: ThreadSanitizer: data race
+  Write of size 8 ... operator delete              <- spdlog worker 线程
+  Previous atomic write of size 4 ... _M_release   <- 主线程 my::log::shutdown()
+  stack: async_msg::~async_msg / thread_pool::process_next_msg_
+```
+
+队列里每条 `async_msg` 都持有一份 logger 的 `shared_ptr`，所以 `shutdown()` 释放自己那份时，
+最后一份引用可能由 worker 线程释放 —— 引用计数本身是原子的（安全），但 TSan 把它判成 race。
+修法两条：
+
+1. `shutdown()` 改为**先按 `queue_size()` 有界排空，再释放 logger**（spdlog 没有停止接口，
+   `post_async_msg_` 是私有的，只能等）；
+2. 新增 `tests/tsan.supp`，**按栈帧**窄化抑制 spdlog 这条销毁路径 —— 我们自己的代码一条都不抑制，
+   文件里逐条写了"为什么它不是真问题"。CI 的 `linux-tsan` 通过
+   `TSAN_OPTIONS=...:suppressions=$${workspace}/tests/tsan.supp` 加载（必须绝对路径，
+   ctest 的工作目录是 `build/ci-tsan`）。
+
+因为 `libmy_cpp_libs_log` 变了，v0.1.3 的四个 SDK 包**重新构建并重新上传**，
+release 的 tag 也移到修复后的提交上 —— 发布出去的包与仓库代码保持一致。
+
 ### 验证矩阵
 
 | 配置 | 结果 |
