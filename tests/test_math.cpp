@@ -3,6 +3,7 @@
 #include <my_cpp_libs/math/math.hpp>
 
 #include <cmath>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -222,4 +223,103 @@ MYTEST_CASE(math_aligned_vector) {
     for (const auto& e : v) {
         CHECK_EQ(e(0), e(3));
     }
+}
+
+// -----------------------------------------------------------------------------
+//  least_squares / transform / all_finite 的错误路径
+// -----------------------------------------------------------------------------
+MYTEST_CASE(math_least_squares_rejects_nonfinite_matrix) {
+    // 回归：以前把矩阵喂给 Eigen::Ref<VecXd>，Debug 构建会触发 Eigen 断言；
+    // 现在必须先走 matrix_all_finite()，返回 InvalidArgument 而不是崩溃/断言。
+    m::MatXd A(3, 3);
+    A << 1, 2, 3,
+         4, 5, 6,
+         7, 8, 9;
+    m::VecXd b(3);
+    b << 1, 2, 3;
+
+    m::MatXd nan_mat = A;
+    nan_mat(1, 1)    = std::nan("");
+    auto nan_res     = m::least_squares(nan_mat, b);
+    CHECK(!nan_res);
+    CHECK_EQ(nan_res.status().code(), my::Errc::InvalidArgument);
+
+    m::MatXd inf_mat = A;
+    inf_mat(2, 0)    = std::numeric_limits<double>::infinity();
+    auto inf_res     = m::least_squares(inf_mat, b);
+    CHECK(!inf_res);
+    CHECK_EQ(inf_res.status().code(), my::Errc::InvalidArgument);
+
+    // 右端向量含 NaN 同样要拒绝
+    m::VecXd bad_b = b;
+    bad_b[0]       = std::nan("");
+    auto b_res     = m::least_squares(A, bad_b);
+    CHECK(!b_res);
+    CHECK_EQ(b_res.status().code(), my::Errc::InvalidArgument);
+}
+
+MYTEST_CASE(math_least_squares_ok) {
+    // y = 2x + 1 的四个无噪声点；列顺序 [1, x] => 解 = [截距, 斜率] = [1, 2]
+    m::MatXd A(4, 2);
+    A << 1, 0,
+         1, 1,
+         1, 2,
+         1, 3;
+    m::VecXd b(4);
+    b << 1, 3, 5, 7;
+
+    auto x = m::least_squares(A, b);
+    CHECK_RESULT(x);
+    CHECK_EQ(x.value().size(), Eigen::Index{2});
+    CHECK_NEAR(x.value()[0], 1.0, 1e-12);
+    CHECK_NEAR(x.value()[1], 2.0, 1e-12);
+    // 精确线性关系下残差应当接近 0
+    CHECK_NEAR((A * x.value() - b).norm(), 0.0, 1e-10);
+}
+
+MYTEST_CASE(math_transform_rotation_checks) {
+    // 单位阵：成功且旋转部分就是单位阵
+    const m::Mat4d identity = m::Mat4d::Identity();
+    auto identity_rot       = m::transform_rotation(identity);
+    CHECK_RESULT(identity_rot);
+    CHECK_NEAR((identity_rot.value() - m::Mat3d::Identity()).norm(), 0.0, 1e-12);
+
+    // 非正交（把某个元素改成 2）：InvalidArgument，而不是返回一个坏矩阵
+    m::Mat4d scaled = m::Mat4d::Identity();
+    scaled(0, 0)    = 2.0;
+    auto scaled_rot = m::transform_rotation(scaled);
+    CHECK(!scaled_rot);
+    CHECK_EQ(scaled_rot.status().code(), my::Errc::InvalidArgument);
+
+    // 平移部分取回
+    const m::Mat3d R = m::rotation_zyx(0.1, -0.2, 0.3);
+    const m::Vec3d t(1.5, -2.5, 3.5);
+    const m::Mat4d T = m::make_transform(R, t);
+    const m::Vec3d back = m::transform_translation(T);
+    CHECK_NEAR(back.x(), 1.5, 1e-15);
+    CHECK_NEAR(back.y(), -2.5, 1e-15);
+    CHECK_NEAR(back.z(), 3.5, 1e-15);
+
+    // 旋转部分非单位但合法的矩阵也要放行
+    auto legal = m::transform_rotation(T);
+    CHECK_RESULT(legal);
+    CHECK_NEAR((legal.value() - R).norm(), 0.0, 1e-12);
+}
+
+MYTEST_CASE(math_all_finite) {
+    m::VecXd v(3);
+    v << 1.0, 2.0, 3.0;
+    CHECK(m::all_finite(v));
+
+    m::VecXd with_inf = v;
+    with_inf[1]       = std::numeric_limits<double>::infinity();
+    CHECK(!m::all_finite(with_inf));
+
+    m::VecXd with_nan = v;
+    with_nan[2]       = std::nan("");
+    CHECK(!m::all_finite(with_nan));
+
+    // 空向量没有非有限值 -> true（数学上是空真）
+    const m::VecXd empty;
+    CHECK(m::all_finite(empty));
 }

@@ -55,6 +55,10 @@ Result<Samples> inst_freq_hz(const Samples& x, double sample_rate, bool absolute
 std::vector<Complex> integrate_dump_complex(const CSamples& x, double sps, double offset) {
     std::vector<Complex> out;
     if (sps <= 1.0 || offset < 0.0) return out;
+    // offset 允许大于信号长度（sps 很大时定时搜索范围会超出信号），必须先挡住：
+    // 否则 (x.size() - offset) 为负，static_cast<size_t> 是未定义行为，
+    // 紧接着 reserve(巨大值) 会抛 length_error 穿透 Result 边界。
+    if (offset >= static_cast<double>(x.size())) return out;
     const std::size_t nsym = static_cast<std::size_t>(
         (static_cast<double>(x.size()) - offset) / sps);
     out.reserve(nsym);

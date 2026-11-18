@@ -27,7 +27,11 @@ if(NOT TARGET my_cpp_libs::platform)
     add_library(my_cpp_libs::platform INTERFACE IMPORTED)
     set_target_properties(my_cpp_libs::platform PROPERTIES
         INTERFACE_INCLUDE_DIRECTORIES "${my_cpp_libs_INCLUDE_DIRS}"
-        INTERFACE_COMPILE_DEFINITIONS "@MYLIB_SDK_PLATFORM_DEFS@")
+        INTERFACE_COMPILE_DEFINITIONS "@MYLIB_SDK_PLATFORM_DEFS@"
+        # 公共头要求 C++17。这里必须显式声明：`add_subdirectory` 用法由
+        # Platform.cmake 传下去，而 SDK 用法只有这份 Config 能把要求带给消费方。
+        # 少了它，一个默认用 C++14 的下游工程会在 #include 时就编不过。
+        INTERFACE_COMPILE_FEATURES cxx_std_17)
     # spdlog / 我们的线程相关代码都要 pthread（Windows 上 Threads::Threads 基本为空）
     set_property(TARGET my_cpp_libs::platform APPEND PROPERTY
                  INTERFACE_LINK_LIBRARIES Threads::Threads)

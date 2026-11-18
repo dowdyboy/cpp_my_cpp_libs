@@ -54,7 +54,10 @@ MYLIB_API const char* errc_name(Errc code) noexcept;
 // -----------------------------------------------------------------------------
 //  Status
 // -----------------------------------------------------------------------------
-class Status {
+/// 失败必须被处理：显式丢弃要写 `(void)`，否则编译器告警。
+/// （Result<T> 已经是 [[nodiscard]]，Status 之前漏了，导致"启动失败被吞掉"这类
+///   问题只能靠读代码发现，见 src/http/http.cpp 里那批 `(void)route(...)`。）
+class [[nodiscard]] Status {
 public:
     /// 成功状态
     Status() noexcept = default;

@@ -53,6 +53,10 @@ static constexpr int      kShutWr    = SHUT_WR;
 namespace my::net {
 namespace {
 
+/// 单次缓冲区分配上限。recv_exact()/read_frame() 的 size 来自外部报文，
+/// 没有上限时一个畸形长度头就能让进程抛 bad_alloc（异常穿出 Result 边界）。
+constexpr std::size_t kMaxBufferBytes = 256u * 1024u * 1024u;  // 256 MiB
+
 // ----------------------------------------------------------------------------- 平台小工具
 void ensure_wsa() {
 #if defined(_WIN32)
@@ -342,9 +346,9 @@ void TcpSocket::close() noexcept {
     }
 }
 
-bool TcpSocket::valid() const noexcept { return fd_ >= 0; }
+bool TcpSocket::valid() const noexcept { return fd_ != static_cast<std::intptr_t>(kInvalidFd); }
 
-int TcpSocket::native_handle() const noexcept { return static_cast<int>(fd_); }
+std::intptr_t TcpSocket::native_handle() const noexcept { return fd_; }
 
 Result<TcpSocket> TcpSocket::connect(const Endpoint& ep, int timeout_ms) {
     ensure_wsa();
@@ -496,6 +500,15 @@ Result<std::size_t> TcpSocket::recv(void* buffer, std::size_t size) {
 }
 
 Result<Bytes> TcpSocket::recv_exact(std::size_t size) {
+    // 顺序：先做纯参数校验（不碰状态、不分配），再查 socket 有效性，最后才分配。
+    //   * 参数越界属于调用方错误，和 socket 有没有连上无关，先报；
+    //   * 有效性必须在 Bytes out(size) 之前查，否则"未连接的 socket + 256 MiB 请求"
+    //     会先吃掉 256 MiB 再返回 NotInitialized（小内存板子上可能直接败）。
+    if (size > kMaxBufferBytes) {
+        return Status(Errc::OutOfRange, "recv_exact 请求的字节数过大: " + std::to_string(size) +
+                                            "（上限 " + std::to_string(kMaxBufferBytes) + "）");
+    }
+    if (!valid()) return Status(Errc::NotInitialized, "socket 未打开");
     Bytes out(size);
     std::size_t got = 0;
     while (got < size) {

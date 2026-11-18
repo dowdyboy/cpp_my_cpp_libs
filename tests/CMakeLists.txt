@@ -14,7 +14,7 @@
 #
 #  另外保留一个 --list 自检：用例注册机制坏了（某个 TU 忘了 MYTEST_SUITE）会暴露。
 # =============================================================================
-set(_test_sources test_main.cpp test_core.cpp)
+set(_test_sources test_main.cpp test_framework_self.cpp test_core.cpp)
 set(_test_suites core)
 set(_test_links mylib_core)
 
@@ -122,9 +122,21 @@ endforeach()
 list(REMOVE_DUPLICATES _case_names)
 list(LENGTH _case_names _case_count)
 
+if(_case_count EQUAL 0)
+    message(FATAL_ERROR "用例扫描结果为 0 —— MYTEST_CASE 正则或源码结构出问题了，拒绝生成一个空测试集")
+endif()
+
+# 这个构建里如果有**真的**推理后端，ml 用例就不许 skip（skip 意味着 golden 对拍没跑）。
+# 没有后端时（MinGW 没有 ORT）skip 是合法的环境限制，只在汇总里显示。
+set(_case_extra_args "")
+if(MYLIB_ENABLE_ML AND MYLIB_INFER_BACKEND STREQUAL "onnxruntime")
+    list(APPEND _case_extra_args --fail-on-skip)
+endif()
+
 if(NOT CMAKE_CROSSCOMPILING)
     foreach(_name ${_case_names})
-        add_test(NAME mylib_case_${_name} COMMAND mylib_tests --case=${_name})
+        add_test(NAME mylib_case_${_name} COMMAND mylib_tests --case=${_name}
+                 ${_case_extra_args})
         set_tests_properties(mylib_case_${_name} PROPERTIES
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             LABELS "${_name}"
@@ -136,6 +148,14 @@ if(NOT CMAKE_CROSSCOMPILING)
     set_tests_properties(mylib_list_cases PROPERTIES
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
         PASS_REGULAR_EXPRESSION "core:"
+        TIMEOUT 60)
+
+    # 自检 2：二进制里实际注册的用例数必须等于源码扫描数。
+    # 少了（新增 test_*.cpp 但没加进 _test_sources）或多了（扫描漏了某个文件）
+    # 都会在这里变成失败，而不是"少跑几个用例还全绿"。
+    add_test(NAME mylib_case_count COMMAND mylib_tests --expect-cases=${_case_count})
+    set_tests_properties(mylib_case_count PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
         TIMEOUT 60)
 
     message(STATUS "单元测试：${_case_count} 个用例已按用例注册到 CTest")

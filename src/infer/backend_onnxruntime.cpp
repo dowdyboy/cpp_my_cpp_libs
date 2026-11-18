@@ -185,8 +185,19 @@ public:
             outcomes.clear();
             outcomes.reserve(last_outputs_.size());
             for (std::size_t i = 0; i < last_outputs_.size(); ++i) {
-                auto info  = last_outputs_[i].GetTensorTypeAndShapeInfo();
-                auto dims  = info.GetShape();
+                auto info = last_outputs_[i].GetTensorTypeAndShapeInfo();
+                auto dims = info.GetShape();
+
+                // 字节数必须按**模型实际输出类型**算，不能信端口声明：
+                // 声明和实际不一致时（真实模型里 fp16/uint8 输出很常见），
+                // 下游 tensor_to_float32 会按错误的 bytes 去读，直接越界。
+                ONNXTensorElementDataType declared{};
+                if (!to_ort(output_ports_[i].type, declared) ||
+                    info.GetElementType() != declared) {
+                    return Status(Errc::Unsupported,
+                                  "模型输出 '" + output_ports_[i].name +
+                                      "' 的实际数据类型与端口声明不一致（算子/图被改过？）");
+                }
                 auto bytes = info.GetElementCount() * dtype_size(output_ports_[i].type);
 
                 Outcome o;

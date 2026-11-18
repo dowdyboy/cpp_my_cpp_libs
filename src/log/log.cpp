@@ -40,8 +40,17 @@ struct State {
 };
 
 State& state() {
-    static State s;
-    return s;
+    // **故意不析构**（有意泄漏这一个对象）。
+    //
+    // State 里有 mutex 和 shared_ptr<logger>。原来写成 `static State s;` 时，
+    // 它会跟着静态析构顺序一起销毁；如果宿主在**自己的静态对象析构函数里**写日志
+    // （很常见的"关闭时打最后一行"写法），就会去锁一个已经销毁的 mutex ——
+    // 表现为退出时偶发崩溃或挂死，而且极难定位。
+    //
+    // log.hpp 承诺"任何阶段都可调用"，那就不能让它的生命周期短于进程。
+    // 换成函数内静态指针后，进程退出时会直接 _exit 掉这块内存，不再析构。
+    static State* s = new State();
+    return *s;
 }
 
 /// 未初始化时的兜底输出：直写 stderr，不分配、不加锁（stdio 自带锁）

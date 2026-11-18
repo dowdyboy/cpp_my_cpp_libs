@@ -141,6 +141,55 @@ MYTEST_CASE(image_resize_rejects_bad_size) {
     CHECK_ERR(my::image::resize(src, 4, -1));
 }
 
+MYTEST_CASE(image_resize_rejects_huge_output) {
+    Image src = make_image(2, 2, 3);
+
+    // 100000 x 100000 x 3 ≈ 28 GiB：必须有上限检查并返回 OutOfRange，
+    // 不能让 std::vector 在 Result 边界外抛 bad_alloc。
+    auto bilinear = my::image::resize(src, 100000, 100000);
+    CHECK(!bilinear);
+    CHECK_EQ(bilinear.status().code(), my::Errc::OutOfRange);
+
+    // 最近邻走同一条输出上限检查
+    auto nearest = my::image::resize_nearest(src, 100000, 100000);
+    CHECK(!nearest);
+    CHECK_EQ(nearest.status().code(), my::Errc::OutOfRange);
+}
+
+MYTEST_CASE(image_resize_same_size_returns_input) {
+    Image src = make_image(3, 2, 3);
+    for (std::size_t i = 0; i < src.pixels.size(); ++i) {
+        src.pixels[i] = static_cast<std::uint8_t>(i * 11u);
+    }
+
+    CHECK_OK_VALUE(same, my::image::resize(src, 3, 2));
+    CHECK_EQ(same.width, 3);
+    CHECK_EQ(same.height, 2);
+    CHECK_EQ(same.channels, 3);
+    CHECK_EQ(same.pixels.size(), src.pixels.size());
+    CHECK(same.pixels == src.pixels);  // 同尺寸必须原样返回，不做任何重采样
+
+    // 最近邻同样走"同尺寸直接返回"的捷径
+    CHECK_OK_VALUE(same_nearest, my::image::resize_nearest(src, 3, 2));
+    CHECK(same_nearest.pixels == src.pixels);
+}
+
+MYTEST_CASE(image_resize_downscale_to_1x1) {
+    Image src = make_image(4, 4, 1);
+    for (std::size_t i = 0; i < src.pixels.size(); ++i) {
+        src.pixels[i] = static_cast<std::uint8_t>(i);
+    }
+
+    CHECK_OK_VALUE(one, my::image::resize(src, 1, 1));
+    CHECK_EQ(one.width, 1);
+    CHECK_EQ(one.height, 1);
+    CHECK_EQ(one.channels, 1);  // 下采样不得改变通道数
+    CHECK_EQ(one.pixels.size(), std::size_t{1});
+    // 4x4 缩到 1x1 时采样中心落在 (1.5,1.5)：
+    // (5+6+9+10)/4 = 7.5 -> 四舍五入 8
+    CHECK_EQ(one.pixels[0], std::uint8_t{8});
+}
+
 // -----------------------------------------------------------------------------
 //  letterbox / 预处理
 // -----------------------------------------------------------------------------
@@ -298,4 +347,21 @@ MYTEST_CASE(image_prepare_rejects_bad_arguments) {
     spec.dst_channels = 0;
     spec.input_width  = 0;
     CHECK_ERR(my::image::prepare(src, spec));
+}
+
+MYTEST_CASE(image_prepare_rejects_zero_dim) {
+    Image src = make_image(4, 4, 3);
+
+    // 模型输入宽为 0：必须是 InvalidArgument（而不是之后除零/分配 0 字节后跑出空张量）
+    my::image::PreprocessSpec spec;
+    spec.input_width = 0;
+    auto zero_w      = my::image::prepare(src, spec);
+    CHECK(!zero_w);
+    CHECK_EQ(zero_w.status().code(), my::Errc::InvalidArgument);
+
+    spec.input_width  = 4;
+    spec.input_height = 0;
+    auto zero_h       = my::image::prepare(src, spec);
+    CHECK(!zero_h);
+    CHECK_EQ(zero_h.status().code(), my::Errc::InvalidArgument);
 }

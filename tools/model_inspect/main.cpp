@@ -295,8 +295,12 @@ int main(int argc, char** argv) {
     // -------------------------------------------------------------------------
     if (args.bench > 0) {
         std::printf("\n[5] 延迟（%d 次）\n", args.bench);
-        // 预热一次
-        sess.run(feeds, outcomes);
+        // 预热一次。Status 是 [[nodiscard]]：预热失败必须报出来，
+        // 否则后面测出来的是"失败得快"而不是延迟。
+        if (auto warm = sess.run(feeds, outcomes); !warm) {
+            std::printf("    预热失败: %s\n", warm.to_string().c_str());
+            return 1;
+        }
 
         const auto t0 = std::chrono::steady_clock::now();
         for (int i = 0; i < args.bench; ++i) {

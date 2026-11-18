@@ -128,7 +128,7 @@ my::log::set_sink([](my::log::Level lv, std::string_view msg) {
 | 行为 | 说明 |
 |---|---|
 | 未 `init()` 也能用 | 落到 stderr，不丢日志、不崩 |
-| `init()` 可重复调用 | 先 shutdown 再重建 |
+| `init()` 可重复调用 | 先在新 logger 上把配置建成功，再整体替换（旧对象在锁外销毁，失败时老配置原样保留） |
 | `shutdown()` 后写 | 回到 stderr 兜底 |
 | 异步日志 | 退出前 `flush()` 或 `shutdown()`，否则可能丢尾部 |
 | 阈值 | `write()` 先判 `should_log()`，sink 只会收到该收的 |

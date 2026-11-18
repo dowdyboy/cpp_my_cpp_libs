@@ -194,23 +194,25 @@ MYTEST_CASE(net_tcp_send_after_peer_close_does_not_crash) {
     std::this_thread::sleep_for(100ms);
 
     std::vector<std::uint8_t> big(256 * 1024, 0x5A);
-    bool                      got_error = false;
-    for (int i = 0; i < 8; ++i) {
+    bool     got_error = false;
+    my::Errc code      = my::Errc::Ok;
+    // 进程还活着本身就是断言的一部分：如果实现漏了 MSG_NOSIGNAL，第一条 send
+    // 就会因为 SIGPIPE 杀掉进程，走不到下面任何一行。休眠后 RST 已经到达，
+    // 往死连接写必须表现为 Status —— 这里给足次数，不能靠"碰巧第一次就失败"。
+    for (int i = 0; i < 32 && !got_error; ++i) {
         auto st = cli.value().send_all(big.data(), big.size());
         if (!st) {
             got_error = true;
-            break;
+            code      = st.code();
         }
     }
-    // 这个用例真正的断言是"进程还活着"：下面把 SIGPIPE 恢复成默认动作，
-    // 如果实现漏了 MSG_NOSIGNAL，往死连接写会直接杀进程，走不到这里。
-    // 能走到这里说明没被杀。POSIX 上休眠后 RST 已到，写死连接必须报错；
-    // Windows 的语义宽松一些，允许"没报错但 socket 仍有效"。
-#if defined(_WIN32)
-    CHECK(got_error || cli.value().valid());
-#else
+    // 原来的判据 `got_error || valid()` 是恒真的（valid() 就是 fd_ >= 0，
+    // 而发送失败并不会关闭 socket），等于什么都没验。真正要验的是：
+    //   1) 写死连接报的是 I/O 类错误，而不是静默成功；
+    //   2) 失败后句柄仍然有效（调用方可能还要 shutdown_write 收尾）。
     CHECK(got_error);
-#endif
+    CHECK(code == my::Errc::IoError || code == my::Errc::RuntimeError);
+    CHECK(cli.value().valid());
 }
 
 MYTEST_CASE(net_tcp_closed_socket_reports_not_initialized) {
@@ -377,4 +379,208 @@ MYTEST_CASE(net_udp_multicast_join_rejects_bad_group) {
     auto st = s.value().join_multicast("not-an-ip");
     CHECK(!st);
     CHECK_EQ(st.code(), my::Errc::InvalidArgument);
+}
+
+// -----------------------------------------------------------------------------
+//  补充覆盖：缓冲区上限、半包、端口占用、大缓冲发送、移动语义、地址解析错误
+// -----------------------------------------------------------------------------
+
+MYTEST_CASE(net_recv_exact_rejects_oversized) {
+    // 上限检查必须在触碰句柄之前：这里故意用一个**未连接**的 socket，
+    // 如果实现先判 valid()，拿到的会是 NotInitialized 而不是 OutOfRange。
+    my::net::TcpSocket s;
+    CHECK(!s.valid());
+
+    const std::size_t too_big = 257u * 1024u * 1024u;   // 超过 kMaxBufferBytes（256 MiB）
+    auto              r       = s.recv_exact(too_big);
+    CHECK(!r);
+    CHECK_EQ(r.status().code(), my::Errc::OutOfRange);
+
+    const std::string msg = r.status().message();
+    CHECK(msg.find(std::to_string(too_big)) != std::string::npos);   // 报出请求的字节数
+    CHECK(msg.find("268435456") != std::string::npos);               // 报出上限 256 MiB
+}
+
+MYTEST_CASE(net_recv_exact_partial_then_close) {
+    auto l = my::net::TcpListener::bind({"127.0.0.1", 0}, 1);
+    CHECK_RESULT(l);
+
+    const std::uint8_t three[3] = {'a', 'b', 'c'};
+    std::atomic<bool>  sent{false};
+    JoinGuard          peer(std::thread([&] {
+        auto c = l.value().accept(3000);
+        if (!c) return;
+        auto st = c.value().send_all(three, sizeof(three));
+        sent    = st.ok();
+        // 半关闭写端：3 字节保证送达，对端随后读到 EOF（比直接 close 更确定，
+        // 不会因为接收队列里有数据而变成 RST）
+        if (st) (void)c.value().shutdown_write();
+        std::this_thread::sleep_for(20ms);
+        c.value().close();
+    }));
+
+    auto cli = my::net::TcpSocket::connect({"127.0.0.1", l.value().port()}, 3000);
+    CHECK_RESULT(cli);
+    CHECK_OK(cli.value().set_timeout(2000));
+    if (peer.t.joinable()) peer.t.join();
+    CHECK(sent.load());
+
+    auto got = cli.value().recv_exact(64);
+    CHECK(!got);
+    CHECK_EQ(got.status().code(), my::Errc::IoError);
+    // 现场定位"只收到半包"全靠这个消息里的数字
+    CHECK(got.status().message().find("已收 3/64") != std::string::npos);
+    CHECK(cli.value().valid());   // recv_exact 失败不隐式关闭句柄
+}
+
+MYTEST_CASE(net_bind_port_in_use) {
+    auto first = my::net::TcpListener::bind({"127.0.0.1", 0}, 4);
+    CHECK_RESULT(first);
+    const std::uint16_t port = first.value().port();
+    CHECK(port != 0);
+
+    // 第二个 listener 抢同一端口。显式 reuse_addr=false：SO_REUSEADDR 打开时
+    // Windows 允许重复 bind 同一地址，测的就不是"端口被占用"了。
+    auto second = my::net::TcpListener::bind({"127.0.0.1", port}, 4, /*reuse_addr=*/false);
+    CHECK(!second);
+    CHECK_EQ(second.status().code(), my::Errc::IoError);
+    CHECK(second.status().message().find("bind 失败") != std::string::npos);
+
+    // 失败不能影响原来那个监听者
+    CHECK(first.value().valid());
+    CHECK_EQ(first.value().port(), port);
+}
+
+MYTEST_CASE(net_send_all_large_buffer) {
+    auto p = SocketPair::make();
+    CHECK_RESULT(p);
+
+    const std::size_t total = 1024u * 1024u;   // 1 MiB：远超内核单次发送缓冲，必然部分写
+    my::net::Bytes    payload(total);
+    for (std::size_t i = 0; i < total; ++i) {
+        payload[i] = static_cast<std::uint8_t>((i * 31u + 7u) & 0xFFu);
+    }
+
+    std::atomic<int> send_code{static_cast<int>(my::Errc::Ok)};
+    JoinGuard        sender(std::thread([&] {
+        auto st = p.value().a.send_all(payload.data(), payload.size());
+        send_code.store(static_cast<int>(st ? my::Errc::Ok : st.code()));
+    }));
+
+    auto got = p.value().b.recv_exact(total);
+    CHECK_RESULT(got);
+    CHECK_EQ(got.value().size(), total);
+    CHECK(got.value() == payload);   // 逐字节一致：部分写之后循环发送没有丢/错位
+
+    if (sender.t.joinable()) sender.t.join();
+    CHECK_EQ(send_code.load(), static_cast<int>(my::Errc::Ok));
+}
+
+MYTEST_CASE(net_move_transfers_handle) {
+    auto p = SocketPair::make();
+    CHECK_RESULT(p);
+
+    const std::intptr_t handle = p.value().a.native_handle();
+    CHECK(p.value().a.valid());
+    CHECK(p.value().b.valid());
+    CHECK(handle != static_cast<std::intptr_t>(-1));
+
+    // move 构造：句柄转移到新对象，源对象必须失效
+    my::net::TcpSocket moved(std::move(p.value().a));
+    CHECK(!p.value().a.valid());
+    CHECK(moved.valid());
+    CHECK_EQ(moved.native_handle(), handle);
+    CHECK(p.value().a.native_handle() != handle);
+
+    // 转移的是同一个连接，而不只是标志位：写进去，对端能收到
+    const std::string ping = "moved-handle";
+    CHECK_OK(moved.send_all(ping.data(), ping.size()));
+    auto got = p.value().b.recv_exact(ping.size());
+    CHECK_RESULT(got);
+    CHECK_EQ(std::string(got.value().begin(), got.value().end()), ping);
+
+    // move 赋值：目标拿到句柄，源对象失效
+    auto p2 = SocketPair::make();
+    CHECK_RESULT(p2);
+    const std::intptr_t handle2 = p2.value().b.native_handle();
+    CHECK(handle2 != static_cast<std::intptr_t>(-1));
+
+    my::net::TcpSocket target;
+    target = std::move(p2.value().b);
+    CHECK(!p2.value().b.valid());
+    CHECK(target.valid());
+    CHECK_EQ(target.native_handle(), handle2);
+    CHECK(p2.value().b.native_handle() != handle2);
+
+    // 覆盖一个已经持有句柄的目标：旧句柄必须被关闭（不能泄漏）
+    my::net::TcpSocket holder;
+    holder = std::move(p2.value().a);   // 先接管 p2 的 client 端
+    CHECK(holder.valid());
+    holder = std::move(target);         // 旧句柄在此被 close，改持 handle2
+    CHECK(!target.valid());
+    CHECK(holder.valid());
+    CHECK_EQ(holder.native_handle(), handle2);
+
+    // 旧句柄确实被关掉了：它的对端正是 handle2 这条连接，现在读到 EOF
+    std::uint8_t buf[8];
+    auto         eof = holder.recv(buf, sizeof(buf));
+    CHECK_RESULT(eof);
+    CHECK_EQ(eof.value(), std::size_t{0});
+}
+
+MYTEST_CASE(net_read_line_crlf) {
+    auto p = SocketPair::make();
+    CHECK_RESULT(p);
+
+    // 全 CRLF 行尾 + 一个空行 + 最后一行没有换行符（对端完全关闭，不是半关闭）
+    const std::string text = "abc\r\n\r\ntail";
+    CHECK_OK(p.value().a.send_all(text.data(), text.size()));
+    p.value().a.close();
+
+    std::string line;
+    CHECK_OK(my::net::read_line(p.value().b, line));
+    CHECK_EQ(line, std::string("abc"));   // 行尾 '\r' 必须去掉
+    CHECK(line.find('\r') == std::string::npos);
+
+    CHECK_OK(my::net::read_line(p.value().b, line));
+    CHECK(line.empty());                  // 空行是合法的一行
+
+    CHECK_OK(my::net::read_line(p.value().b, line));
+    CHECK_EQ(line, std::string("tail"));  // 没有换行符的最后一行靠 EOF 收尾
+    CHECK(line.find('\r') == std::string::npos);
+
+    // 剩余部分已经消费完，再读就是"对端关闭且没读到行"
+    auto st = my::net::read_line(p.value().b, line);
+    CHECK(!st);
+    CHECK_EQ(st.code(), my::Errc::IoError);
+}
+
+MYTEST_CASE(net_endpoint_parse_errors) {
+    // 非法端口必须报错，而不是退化成 0 端口静默通过
+    auto bad_port = my::net::parse_endpoint("host:notaport");
+    CHECK(!bad_port);
+    CHECK_EQ(bad_port.status().code(), my::Errc::ParseError);
+    CHECK(bad_port.status().message().find("端口不是数字") != std::string::npos);
+
+    auto too_big = my::net::parse_endpoint("host:70000");
+    CHECK(!too_big);
+    CHECK_EQ(too_big.status().code(), my::Errc::OutOfRange);
+
+    auto just_big = my::net::parse_endpoint("host:65536");   // 刚越过 65535
+    CHECK(!just_big);
+    CHECK_EQ(just_big.status().code(), my::Errc::OutOfRange);
+
+    // 边界值本身合法，说明上面拒的是越界而不是"数字太大就拒"
+    CHECK_OK_VALUE(max_port, my::net::parse_endpoint("host:65535"));
+    CHECK_EQ(max_port.port, std::uint16_t{65535});
+    CHECK(max_port.host == "host");
+
+    // IPv6 缺 ']' / ']' 后面不是 ':'
+    auto no_bracket = my::net::parse_endpoint("[::1");
+    CHECK(!no_bracket);
+    CHECK_EQ(no_bracket.status().code(), my::Errc::InvalidArgument);
+
+    auto bad_tail = my::net::parse_endpoint("[::1]x");
+    CHECK(!bad_tail);
+    CHECK_EQ(bad_tail.status().code(), my::Errc::InvalidArgument);
 }

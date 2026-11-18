@@ -9,6 +9,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -56,7 +57,8 @@ MYTEST_CASE(result_error) {
 
 MYTEST_CASE(result_move_only) {
     my::Result<std::vector<int>> r = std::vector<int>{1, 2, 3};
-    CHECK_OK(r.status());
+    CHECK(r.ok());
+    CHECK_EQ(r.status().code(), my::Errc::Ok);
     CHECK_EQ(r.value().size(), std::size_t{3});
 
     my::Result<std::unique_ptr<int>> u(std::unique_ptr<int>(new int(5)));
@@ -192,4 +194,77 @@ MYTEST_CASE(half_bit_exact) {
         const std::uint16_t back = my::float_to_half(my::half_to_float(static_cast<std::uint16_t>(bits)));
         CHECK_EQ(back, static_cast<std::uint16_t>(bits));
     }
+}
+
+// -----------------------------------------------------------------------------
+//  Result<T> 的变换/兜底语义
+// -----------------------------------------------------------------------------
+MYTEST_CASE(core_result_map_propagates_error) {
+    my::Result<int> bad(my::Status(my::Errc::ParseError, "字段缺失"));
+
+    bool called = false;
+    auto doubled = bad.map([&called](int v) {
+        called = true;
+        return v * 2;
+    });
+    CHECK(!called);  // 失败状态不得调用映射函数
+    CHECK(!doubled.ok());
+    CHECK_EQ(doubled.status().code(), my::Errc::ParseError);
+    CHECK_EQ(doubled.status().message(), std::string("字段缺失"));
+    CHECK_EQ(doubled.value_or(-1), -1);
+
+    // map 换类型时也同样原样传递错误码/消息
+    auto as_text = bad.map([](int v) { return std::to_string(v); });
+    CHECK(!as_text.ok());
+    CHECK_EQ(as_text.status().code(), my::Errc::ParseError);
+    CHECK_EQ(as_text.status().message(), std::string("字段缺失"));
+    CHECK_EQ(as_text.value_or(std::string("fallback")), std::string("fallback"));
+
+    // 成功路径的 map 必须真的调用并返回新值
+    my::Result<int> good = 21;
+    auto good_doubled    = good.map([](int v) { return v * 2; });
+    CHECK(good_doubled.ok());
+    CHECK_EQ(good_doubled.value(), 42);
+    CHECK_EQ(good_doubled.status().code(), my::Errc::Ok);
+}
+
+MYTEST_CASE(core_errc_name_unique) {
+    // Errc 是连续枚举（Ok=0 … Unknown 收尾），逐值遍历即可覆盖全部取值。
+    const int last = static_cast<int>(my::Errc::Unknown);
+    CHECK(last > 0);
+
+    std::vector<std::string> names;
+    names.reserve(static_cast<std::size_t>(last) + 1);
+    for (int i = 0; i <= last; ++i) {
+        const char* n = my::errc_name(static_cast<my::Errc>(i));
+        CHECK(n != nullptr);
+        CHECK(n[0] != '\0');
+        names.emplace_back(n);
+    }
+    CHECK_EQ(names.size(), static_cast<std::size_t>(last) + 1);
+
+    // 每个错误码必须映射到不同字符串，否则日志里分不清错误类型
+    const std::set<std::string> unique_names(names.begin(), names.end());
+    CHECK_EQ(unique_names.size(), names.size());
+
+    // 抽查两个高频项，确认遍历的不是同一份内存
+    CHECK_EQ(names[static_cast<std::size_t>(my::Errc::IoError)], std::string("io_error"));
+    CHECK_EQ(names[static_cast<std::size_t>(my::Errc::OutOfRange)], std::string("out_of_range"));
+}
+
+MYTEST_CASE(core_result_value_or) {
+    // 失败 -> 返回 fallback（而不是 abort / 未定义值）
+    my::Result<int> bad(my::Status(my::Errc::NotFound, "missing"));
+    CHECK_EQ(bad.value_or(7), 7);
+
+    // 成功 -> 返回持有的值，fallback 不起作用
+    my::Result<int> good = 42;
+    CHECK_EQ(good.value_or(7), 42);
+
+    // 非平凡类型也走同一条路径（拷贝而不是返回悬垂引用）
+    my::Result<std::string> ok_text = std::string("held");
+    CHECK_EQ(ok_text.value_or(std::string("fallback")), std::string("held"));
+
+    my::Result<std::string> bad_text(my::Status(my::Errc::IoError, "io"));
+    CHECK_EQ(bad_text.value_or(std::string("fallback")), std::string("fallback"));
 }

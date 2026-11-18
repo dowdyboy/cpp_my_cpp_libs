@@ -75,6 +75,8 @@ public:
     MYLIB_API Result<std::size_t> recv(void* buffer, std::size_t size);
 
     /// 收满 size 字节；对端提前关闭 → IoError
+    /// 上限 kMaxBufferBytes：一次分配超过它的请求直接返回 OutOfRange，
+    /// 而不是让 bad_alloc 从 Result 边界穿出去。
     MYLIB_API Result<Bytes> recv_exact(std::size_t size);
 
     /// 半关闭写端（告诉对端"我不再发了"，读端仍然可用）
@@ -82,7 +84,10 @@ public:
 
     MYLIB_API void close() noexcept;
     MYLIB_API bool valid() const noexcept;
-    MYLIB_API int  native_handle() const noexcept;
+
+    /// 底层句柄。Windows 上是 SOCKET（UINT_PTR），所以必须用 intptr_t 返回：
+    /// 原来返回 int 会截断 64 位句柄。
+    MYLIB_API std::intptr_t native_handle() const noexcept;
 
     /// 对端地址（getsockname/getpeername 取到的实际值，失败返回空）
     MYLIB_API Endpoint peer() const;
@@ -104,7 +109,12 @@ public:
     TcpListener& operator=(const TcpListener&) = delete;
 
     /// 绑定监听。port = 0 时由系统分配（用 port() 取实际端口）。
-    /// reuse_addr 默认开：避免服务端重启时 bind 失败（TIME_WAIT）。
+    ///
+    /// reuse_addr 默认开：POSIX 上等价于 SO_REUSEADDR（避免服务端重启时因 TIME_WAIT
+    /// 绑不上）；**Windows 上语义不同** —— SO_REUSEADDR 允许第二个 socket 绑定同一
+    /// 端口，等于把"端口冲突检测"和"端口劫持防护"一起废掉。所以：
+    ///   * 想严格检测端口占用 → 传 reuse_addr = false（两个平台的行为一致，都有 ADDRINUSE）；
+    ///   * 想在 Windows 上默认就独占端口 → 目前需要自己改，见 docs/10 的注意事项。
     MYLIB_API static Result<TcpListener> bind(const Endpoint& ep, int backlog = 8,
                                               bool reuse_addr = true);
 

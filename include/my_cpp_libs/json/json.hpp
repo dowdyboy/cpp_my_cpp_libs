@@ -11,6 +11,7 @@
 // =============================================================================
 
 #include <cstddef>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -33,6 +34,17 @@ MYLIB_API const char* type_name(Type type) noexcept;
 //  路径解析（header-only，便于内联与单元测试）
 // =============================================================================
 namespace detail {
+
+/// 路径里数组下标的上限（只作用于**写**路径）。
+///
+/// 存在的理由：`set("a[N]", v)` 会把 0..N-1 全部补成 null。N 由外部配置文件/网络报文
+/// 决定时，一个 `a[1000000000]` 就能让进程 OOM —— 属于"输入放大"型问题。
+/// 65536 足够覆盖真实配置里的数组，超过基本可以判定是攻击或写错了。
+inline constexpr std::size_t kMaxSparseIndex = 65536;
+
+/// 路径下标的可表示上限（解析期防 size_t 回绕）。单纯读取 `a[5000000]` 是合法的，
+/// 所以读路径不套 kMaxSparseIndex，只挡回绕。
+inline constexpr std::size_t kMaxPathIndex = (std::numeric_limits<std::size_t>::max)() / 16;
 
 struct PathToken {
     enum class Kind { Key, Index };
@@ -66,12 +78,23 @@ inline Result<std::vector<PathToken>> parse_path(std::string_view path) {
     while (i < path.size()) {
         const char c = path[i];
         if (c == '.') {
-            if (!flush_key()) {
+            // 合法形态只有两种：
+            //   "a.b"            —— 前面有待落定的键
+            //   "a[0].b" / "a[0][1].b" —— 前面刚解析完一个 [N]，此时没有 pending 键
+            // 后者以前会被判成"空键"，于是 `a.b[0].c` 这种文档里写着的语法实际用不了。
+            const bool after_index =
+                !has_pending && pending.empty() && !tokens.empty() &&
+                tokens.back().kind == PathToken::Kind::Index;
+            if (!flush_key() && !after_index) {
                 return Status(Errc::InvalidArgument, "JSON 路径中出现了空键: " + std::string(path));
             }
             ++i;
             if (i == path.size()) {
                 return Status(Errc::InvalidArgument, "JSON 路径以 '.' 结尾: " + std::string(path));
+            }
+            // "." 后面必须还是一个键，不能紧跟 '[' 或 '.'
+            if (path[i] == '[' || path[i] == '.') {
+                return Status(Errc::InvalidArgument, "JSON 路径中出现了空键: " + std::string(path));
             }
             continue;
         }
@@ -92,6 +115,12 @@ inline Result<std::vector<PathToken>> parse_path(std::string_view path) {
                                   "JSON 路径索引必须是非负整数: " + std::string(path));
                 }
                 idx = idx * 10 + static_cast<std::size_t>(d - '0');
+                // 只防 size_t 回绕（解析期不该拒绝大下标：读路径 a[500000] 是合法的，
+                // 真正的内存放大风险在"写路径要给中间元素补 null"，那个上限在 resolve_create）
+                if (idx > kMaxPathIndex) {
+                    return Status(Errc::OutOfRange,
+                                  "JSON 路径数组下标超出可表示范围: " + std::string(path));
+                }
             }
             PathToken t;
             t.kind  = PathToken::Kind::Index;
@@ -139,6 +168,13 @@ inline Result<Json*> resolve_create(Json& root, const std::vector<PathToken>& to
             if (cur->is_null()) *cur = Json::array();
             if (!cur->is_array()) {
                 return Status(Errc::InvalidArgument, "JSON 路径上的中间节点不是数组");
+            }
+            // 稀疏下标必须设上限：set("a[1000000000]", 1) 会把中间元素全补成 null，
+            // 一次调用就能吃掉几 GB 内存（配置文件是外部输入，等于一个放大攻击点）。
+            if (tok.index > kMaxSparseIndex) {
+                return Status(Errc::OutOfRange,
+                              "JSON 路径数组下标过大（上限 " + std::to_string(kMaxSparseIndex) +
+                                  "）: " + std::to_string(tok.index));
             }
             // nlohmann 的数组没有 resize()，缺位补 null
             while (cur->size() <= tok.index) cur->push_back(Json());

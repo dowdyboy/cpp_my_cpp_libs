@@ -246,20 +246,41 @@ Status save(const std::string& path, const Image& image, int quality) {
 // -----------------------------------------------------------------------------
 //  缩放
 // -----------------------------------------------------------------------------
-Result<Image> resize(const Image& src, int dst_width, int dst_height) {
-    if (src.empty()) return Status(Errc::InvalidArgument, "输入图像为空");
-    if (dst_width <= 0 || dst_height <= 0) {
+namespace {
+
+/// 输出缓冲上限：resize 会按 dst_w * dst_h * channels 一次性分配。
+/// 没有上限时，`resize(src, 1e6, 1e6)` 直接抛 bad_alloc —— 那是从
+/// `Result<T>` 的边界穿出去的异常，等于把"错误可返回"的契约废掉了。
+constexpr std::size_t kMaxImageBytes = 512u * 1024u * 1024u;  // 512 MiB
+
+Status check_output_size(int width, int height, int channels) {
+    if (width <= 0 || height <= 0 || channels <= 0) {
         return Status(Errc::InvalidArgument, "目标尺寸非法");
     }
+    const std::uint64_t bytes = static_cast<std::uint64_t>(width) *
+                               static_cast<std::uint64_t>(height) *
+                               static_cast<std::uint64_t>(channels);
+    if (bytes > static_cast<std::uint64_t>(kMaxImageBytes)) {
+        return Status(Errc::OutOfRange, "目标图像过大: " + std::to_string(width) + "x" +
+                                            std::to_string(height) + "x" +
+                                            std::to_string(channels) + " bytes=" +
+                                            std::to_string(bytes));
+    }
+    return Ok();
+}
+
+}  // namespace
+
+Result<Image> resize(const Image& src, int dst_width, int dst_height) {
+    if (src.empty()) return Status(Errc::InvalidArgument, "输入图像为空");
+    if (auto st = check_output_size(dst_width, dst_height, src.channels); !st) return st;
     if (dst_width == src.width && dst_height == src.height) return src;
     return resize_impl(src, dst_width, dst_height, /*bilinear=*/true);
 }
 
 Result<Image> resize_nearest(const Image& src, int dst_width, int dst_height) {
     if (src.empty()) return Status(Errc::InvalidArgument, "输入图像为空");
-    if (dst_width <= 0 || dst_height <= 0) {
-        return Status(Errc::InvalidArgument, "目标尺寸非法");
-    }
+    if (auto st = check_output_size(dst_width, dst_height, src.channels); !st) return st;
     if (dst_width == src.width && dst_height == src.height) return src;
     return resize_impl(src, dst_width, dst_height, /*bilinear=*/false);
 }

@@ -97,10 +97,13 @@ jobs:
           key: deps-linux-${{ hashFiles('scripts/fetch-deps.sh', 'scripts/fetch-deps.ps1', 'resources/README.md') }}
           restore-keys: deps-linux-
       - run: bash scripts/fetch-deps.sh
+      # 用 Debug 而不是 RelWithDebInfo：RelWithDebInfo 会定义 NDEBUG，
+      # 断言与前置条件检查全被编译掉，ASan 就只剩下"内存错误"一半的价值。
+      # 独立脚本 scripts/run-tests-asan-wsl.sh 一直用的是 Debug，两者现在对齐了。
       - name: Configure (ASan + 泄漏检测)
         run: |
           cmake -S . -B build/ci-asan -G Ninja \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_BUILD_TYPE=Debug \
             -DMYLIB_SANITIZE=address
       - name: Build
         run: cmake --build build/ci-asan
@@ -313,3 +316,109 @@ jobs:
         run: cmake --build build/ci-ubsan
       - name: Test
         run: ctest --test-dir build/ci-ubsan --output-on-failure
+
+  # ---------------------------------------------------------------- Debug（断言/契约全开）
+  # 为什么必须单独有一个 Debug job：Release / RelWithDebInfo / MinSizeRel 都会定义
+  # NDEBUG，于是 Eigen 的断言、STL 的调试检查、我们自己写的前置条件**一次都不执行**。
+  # 历史上那个"least_squares 把矩阵喂给 Eigen::Ref<VecXd>"的缺陷就是这样：
+  # Release 下靠 NDEBUG 侥幸正确，文档承诺的 ASan(Debug) 路径必崩，而 CI 全是 Release 家族。
+  linux-debug:
+    name: Linux / gcc / Debug（断言全开）
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - uses: actions/cache@v4
+        with:
+          path: |
+            resources
+            third_party
+          key: deps-linux-${{ hashFiles('scripts/fetch-deps.sh', 'scripts/fetch-deps.ps1', 'resources/README.md') }}
+          restore-keys: deps-linux-
+      - run: bash scripts/fetch-deps.sh
+      - name: Configure (Debug)
+        run: |
+          cmake -S . -B build/ci-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug
+      - name: Build
+        run: cmake --build build/ci-debug
+      - name: Test
+        run: ctest --test-dir build/ci-debug --output-on-failure
+
+  # ---------------------------------------------------------------- SDK 安装 + 外部消费
+  # 全仓唯一验证 `find_package(my_cpp_libs CONFIG)` 这条链路的 job。
+  # 没有它，"dist/ 的 SDK 拿到目录就能用"只是一句话：install 规则改坏了、
+  # Config 里漏了编译特性/依赖，都不会有任何人发现。
+  linux-sdk-consumer:
+    name: Linux / SDK install + find_package 消费
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - uses: actions/cache@v4
+        with:
+          path: |
+            resources
+            third_party
+          key: deps-linux-${{ hashFiles('scripts/fetch-deps.sh', 'scripts/fetch-deps.ps1', 'resources/README.md') }}
+          restore-keys: deps-linux-
+      - run: bash scripts/fetch-deps.sh
+      - name: Configure (只装库，不建示例/测试)
+        run: |
+          cmake -S . -B build/ci-sdk -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMYLIB_BUILD_EXAMPLES=OFF \
+            -DMYLIB_BUILD_TESTS=OFF \
+            -DMYLIB_BUILD_TOOLS=OFF \
+            -DCMAKE_INSTALL_PREFIX="$PWD/sdk"
+      - name: Build
+        run: cmake --build build/ci-sdk
+      - name: Install
+        run: cmake --install build/ci-sdk
+      - name: 校验安装树
+        run: |
+          set -e
+          test -f sdk/include/my_cpp_libs/core/status.hpp
+          test -f sdk/lib/cmake/my_cpp_libs/my_cpp_libsConfig.cmake
+          # SDK 必须把 C++17 要求传给消费方，否则默认 C++14 的下游工程编不过
+          grep -q "cxx_std_17" sdk/lib/cmake/my_cpp_libs/my_cpp_libsConfig.cmake
+      - name: 外部工程用 find_package 构建
+        run: |
+          cmake -S tests/sdk_consumer -B build/consumer -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$PWD/sdk"
+          cmake --build build/consumer
+      - name: 运行外部工程（真实链接 + 真实跑）
+        run: ./build/consumer/sdk_consumer
+
+  # ---------------------------------------------------------------- TSan（数据竞争）
+  # log 的全局状态、infer 的后端注册表、http 的线程管理都是"并发写在文档里、
+  # 但一个并发用例都没有"。TSan 是唯一能在 CI 上守住这类问题的工具。
+  linux-tsan:
+    name: Linux / gcc / TSan（数据竞争）
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - uses: actions/cache@v4
+        with:
+          path: |
+            resources
+            third_party
+          key: deps-linux-${{ hashFiles('scripts/fetch-deps.sh', 'scripts/fetch-deps.ps1', 'resources/README.md') }}
+          restore-keys: deps-linux-
+      - run: bash scripts/fetch-deps.sh
+      # Ubuntu 24.04 的 vm.mmap_rnd_bits=32 会让 TSan 报 "unexpected memory mapping"，
+      # 必须降到 28，否则这个 job 从第一秒起就是红的（与代码无关）。
+      - name: 放宽 ASLR（TSan 要求）
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+      - name: Configure (TSan)
+        run: |
+          cmake -S . -B build/ci-tsan -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DMYLIB_SANITIZE=thread
+      - name: Build
+        run: cmake --build build/ci-tsan
+      - name: Test
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: ctest --test-dir build/ci-tsan --output-on-failure

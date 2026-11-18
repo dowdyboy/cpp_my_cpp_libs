@@ -48,11 +48,7 @@ std::string models_root() {
 const std::string kModelDir = models_root() + "/ml/";
 
 bool ml_ready() {
-    static const bool ok = my::infer::has_backend("onnxruntime");
-    if (!ok) {
-        std::printf("          （跳过：本构建没有 onnxruntime 后端，ml 组件无法推理）\n");
-    }
-    return ok;
+    return my::infer::has_backend("onnxruntime");
 }
 
 struct GoldenRow {
@@ -108,7 +104,7 @@ std::vector<GoldenRow> read_golden(const std::string& path, int n_features) {
 }  // namespace
 
 MYTEST_CASE(ml_load_iris_meta) {
-    if (!ml_ready()) return;
+    if (!ml_ready()) MYTEST_SKIP("没有可用的推理后端");
 
     ML_LOAD(m, kModelDir + "iris_logreg.onnx");
 
@@ -128,7 +124,7 @@ MYTEST_CASE(ml_load_iris_meta) {
 }
 
 MYTEST_CASE(ml_iris_matches_golden) {
-    if (!ml_ready()) return;
+    if (!ml_ready()) MYTEST_SKIP("没有可用的推理后端");
 
     ML_LOAD(m, kModelDir + "iris_logreg.onnx");
     const auto rows = read_golden(kModelDir + "iris_logreg.golden.tsv", 4);
@@ -148,7 +144,7 @@ MYTEST_CASE(ml_iris_matches_golden) {
 }
 
 MYTEST_CASE(ml_iris_batch) {
-    if (!ml_ready()) return;
+    if (!ml_ready()) MYTEST_SKIP("没有可用的推理后端");
 
     ML_LOAD(m, kModelDir + "iris_logreg.onnx");
     const auto rows = read_golden(kModelDir + "iris_logreg.golden.tsv", 4);
@@ -165,7 +161,7 @@ MYTEST_CASE(ml_iris_batch) {
 }
 
 MYTEST_CASE(ml_gbdt_matches_golden) {
-    if (!ml_ready()) return;
+    if (!ml_ready()) MYTEST_SKIP("没有可用的推理后端");
 
     ML_LOAD(m, kModelDir + "gbdt_20f.onnx");
     CHECK_EQ(m.meta().n_features, 20);
@@ -185,7 +181,7 @@ MYTEST_CASE(ml_gbdt_matches_golden) {
 }
 
 MYTEST_CASE(ml_ridge_regressor) {
-    if (!ml_ready()) return;
+    if (!ml_ready()) MYTEST_SKIP("没有可用的推理后端");
 
     ML_LOAD(m, kModelDir + "ridge_10f.onnx");
     CHECK_EQ(static_cast<int>(m.meta().kind), static_cast<int>(my::ml::Kind::Regressor));
@@ -206,7 +202,7 @@ MYTEST_CASE(ml_ridge_regressor) {
 }
 
 MYTEST_CASE(ml_rejects_wrong_feature_count) {
-    if (!ml_ready()) return;
+    if (!ml_ready()) MYTEST_SKIP("没有可用的推理后端");
 
     ML_LOAD(m, kModelDir + "iris_logreg.onnx");
 
@@ -226,7 +222,7 @@ MYTEST_CASE(ml_missing_model_reports_not_found) {
 }
 
 MYTEST_CASE(ml_works_without_sidecar) {
-    if (!ml_ready()) return;
+    if (!ml_ready()) MYTEST_SKIP("没有可用的推理后端");
 
     // sidecar 指向不存在的文件：模型本身维度是静态的，应该还能用，
     // 只是拿不到特征名/类别名。
@@ -242,10 +238,26 @@ MYTEST_CASE(ml_works_without_sidecar) {
 }
 
 MYTEST_CASE(ml_sidecar_mismatch_is_rejected) {
-    if (!ml_ready()) return;
+    if (!ml_ready()) MYTEST_SKIP("没有可用的推理后端");
 
     // gbdt 的 sidecar 说 20 维，拿它配 iris（4 维）应当报错而不是"跑出垃圾"
     auto r = my::ml::Model::load(kModelDir + "iris_logreg.onnx", kModelDir + "gbdt_20f.json");
     CHECK(!r);
     CHECK_EQ(r.status().code(), my::Errc::ParseError);
+}
+
+MYTEST_CASE(ml_unloaded_model_reports_error) {
+    // 不依赖 ORT：默认构造的 Model 永远处于"未加载"状态，错误路径必须可返回。
+    my::ml::Model m;
+    CHECK(!m.valid());
+    CHECK(std::string(m.backend()) == "none");
+    CHECK_EQ(m.meta().n_features, 0);
+
+    auto one = m.predict_one({1.0f, 2.0f, 3.0f, 4.0f});
+    CHECK(!one);
+    CHECK_EQ(one.status().code(), my::Errc::NotInitialized);
+
+    auto batch = m.predict({1.0f, 2.0f, 3.0f, 4.0f});
+    CHECK(!batch);
+    CHECK_EQ(batch.status().code(), my::Errc::NotInitialized);
 }

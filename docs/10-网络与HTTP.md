@@ -154,13 +154,19 @@ srv.value().listen();   // 阻塞；stop() 从别的线程停
 6. **TLS 未启用**：只支持 `http://`；`https://` 会明确返回 `Unsupported`。
    需要 HTTPS 时给 httplib 定义 `CPPHTTPLIB_OPENSSL_SUPPORT` 并链接 OpenSSL/mbedTLS，
    建议只在"板子接外网"时开，局域网内用 HTTP + 自己的鉴权头。
+7. **Windows 的 `SO_REUSEADDR` 语义不同（实测确认）**：POSIX 上 `reuse_addr=true`
+   只是允许 TIME_WAIT 期间重绑，**不会**让第二个进程抢同一端口；Windows 上则会让
+   第二个 listener 也绑成功 —— 端口冲突检测和劫持防护同时失效。
+   - 需要可靠的"端口已占用"检测时：`TcpListener::bind(ep, backlog, /*reuse_addr=*/false)`。
+   - 想要 Windows 默认就独占端口，得把实现里的 `SO_REUSEADDR` 换成
+     `SO_EXCLUSIVEADDRUSE`（代价是重启时若落在 TIME_WAIT 会绑不上，目前没改，属已知取舍）。
 
 ## 7. 测试覆盖（本机回环，不依赖外部网络，板端同样全过）
 
 | 套件 | 用例数 | 覆盖 |
 |---|---|---|
-| `net` | 15 | 地址解析、TCP 回显、accept/connect 超时、对端关闭、**SIGPIPE 不杀进程**、分帧（含超大长度拒绝）、行协议、UDP 往返/超时/广播/组播参数校验 |
-| `http` | 11 | GET/POST、JSON 往返、query/路径参数、未知方法拒绝、自定义 header、404 与错误体、读超时、连接拒绝、stop 释放端口、非法 base_url、未初始化客户端 |
+| `net` | 22 | 地址解析、TCP 回显、accept/connect 超时、对端关闭、**SIGPIPE 不杀进程**、分帧（含超大长度拒绝）、行协议（CRLF/无换行 EOF）、UDP 往返/超时/广播/组播参数校验、**recv_exact 半途断连**、**端口占用**、**1 MiB 大包**、**move 语义** |
+| `http` | 17 | GET/POST、JSON 往返、query/路径参数、未知方法拒绝、自定义 header、404 与错误体、读超时、连接拒绝、stop 释放端口、非法 base_url、**IPv6 字面量端口解析**、**端口严格校验**、**handler 内 stop（死锁回归）**、**并发请求**、未初始化客户端 |
 
 ```bash
 ctest --preset win-mingw -R "net_|http_" --output-on-failure

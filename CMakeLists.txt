@@ -15,7 +15,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(my_cpp_libs
-    VERSION 0.1.0
+    VERSION 0.1.1
     DESCRIPTION "Unified cross-platform C++ wrapper over third-party open-source libraries"
     LANGUAGES CXX)
 
@@ -121,6 +121,11 @@ if(MYLIB_SANITIZE)
             target_link_options(mylib_sanitize INTERFACE
                 -fsanitize=undefined -fsanitize-undefined-trap-on-error)
             message(STATUS "Sanitizer       : undefined (trap-on-error，不需要 libubsan)")
+        elseif(MYLIB_SANITIZE STREQUAL "thread")
+            # TSan：抓并发数据竞争（log 的全局状态、infer 后端注册表、http 的线程管理）
+            target_compile_options(mylib_sanitize INTERFACE -fsanitize=thread)
+            target_link_options(mylib_sanitize INTERFACE -fsanitize=thread)
+            message(STATUS "Sanitizer       : thread (TSan)")
         else()
             message(WARNING "未知的 MYLIB_SANITIZE=${MYLIB_SANITIZE}，可选：address / undefined")
         endif()
@@ -416,14 +421,26 @@ else()
     set(_cv_pkg "未接入")
 endif()
 
+# 组件摘要按**实际建出来的 target** 算，不按选项值算。
+# 原来 core/log/json/math/infer 打印的是 MYLIB_ENABLE_xxx，于是"选项开着但组件因为
+# 缺依赖被跳过"时摘要仍然显示 ON —— 摘要存在的意义就是回答"到底编了什么"。
+set(_components_desc "")
+foreach(_c core log json math infer image dsp ml net http cv)
+    if(TARGET mylib_${_c})
+        string(APPEND _components_desc " ${_c}=ON")
+    else()
+        string(APPEND _components_desc " ${_c}=OFF")
+    endif()
+endforeach()
+
 message(STATUS "")
 message(STATUS "================ my_cpp_libs ${PROJECT_VERSION} ================")
 message(STATUS "  System          : ${CMAKE_SYSTEM_NAME} / ${CMAKE_SYSTEM_PROCESSOR}")
 message(STATUS "  Compiler        : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "  Cross-compiling : ${CMAKE_CROSSCOMPILING}")
-message(STATUS "  Build type      : ${CMAKE_BUILD_TYPE}${CMAKE_CONFIGURATION_TYPES}")
+message(STATUS "  Build type      : ${MYLIB_BUILD_TYPE_STR}")
 message(STATUS "  Git commit      : ${MYLIB_GIT_COMMIT}")
-message(STATUS "  Components      : core=${MYLIB_ENABLE_CORE} log=${MYLIB_ENABLE_LOG} json=${MYLIB_ENABLE_JSON} math=${MYLIB_ENABLE_MATH} infer=${MYLIB_ENABLE_INFER} image=${_image_desc} dsp=${_dsp_desc} ml=${_ml_desc} net=${_net_desc} http=${_http_desc} cv=${_cv_desc}")
+message(STATUS "  Components      :${_components_desc}")
 message(STATUS "  Infer backend   : ${_infer_backend_desc}")
 message(STATUS "  ONNX Runtime    : ${_ort_pkg}")
 message(STATUS "  ncnn            : ${_ncnn_pkg}")

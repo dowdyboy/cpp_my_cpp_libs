@@ -65,7 +65,7 @@ Mat4d make_transform(const Mat3d& rotation, const Vec3d& translation) {
     return t;
 }
 
-Result<Mat3d> transform_rotation(const Mat4d& transform) noexcept {
+Result<Mat3d> transform_rotation(const Mat4d& transform) {
     const Mat3d r = transform.block<3, 3>(0, 0);
     // 合法性校验：正交 + 行列式≈1
     const Mat3d should_be_identity = r.transpose() * r;
@@ -129,7 +129,11 @@ Result<VecXd> least_squares(const MatXd& A, const VecXd& b) {
     if (b.size() != A.rows()) {
         return Status(Errc::InvalidArgument, "右端向量维度与矩阵不匹配");
     }
-    if (!all_finite(A) || !all_finite(b)) {
+    // 注意：这里必须用 matrix_all_finite，不能写 all_finite(A)。
+    // all_finite 的形参是 Eigen::Ref<const VecXd>（向量），拿矩阵去匹配会在
+    // 带断言的构建里直接触发 Eigen 的 rows()==1||cols()==1 断言，而在
+    // Release（NDEBUG）下只是"碰巧"按连续内存展平读对了 —— 两类构建行为不一致。
+    if (!matrix_all_finite(A) || !all_finite(b)) {
         return Status(Errc::InvalidArgument, "least_squares 输入包含非有限值");
     }
 

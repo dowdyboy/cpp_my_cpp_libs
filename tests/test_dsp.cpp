@@ -187,6 +187,30 @@ MYTEST_CASE(dsp_fft_zero_padding) {
     CHECK_NEAR(std::abs(X[0]), 10.0, 1e-4);
 }
 
+// 随机复序列的完整往返。dsp_fft_single_tone 只拿单音比了一个样本点，
+// 这里逐点比对，同时锁住"ifft 不除 N"的约定（所以下面要显式除以 n）。
+MYTEST_CASE(dsp_fft_ifft_roundtrip) {
+    const std::size_t n = 128;
+    std::mt19937                          rng(4242);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+
+    CSamples x(n);
+    for (auto& v : x) v = Complex(dist(rng), dist(rng));
+
+    CHECK_OK_VALUE(X, my::dsp::fft(x));
+    CHECK_EQ(X.size(), n);
+    CHECK_OK_VALUE(y, my::dsp::ifft(X));
+    CHECK_EQ(y.size(), n);
+
+    double max_err = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::complex<double> got = std::complex<double>(y[i]) / static_cast<double>(n);
+        const std::complex<double> want(x[i]);
+        max_err = std::max(max_err, std::abs(got - want));
+    }
+    CHECK(max_err < 1e-4);  // 单精度往返误差应当在 1e-6 量级
+}
+
 MYTEST_CASE(dsp_welch_peak) {
     const double fs = 1000.0;
     const double f0 = 125.0;
@@ -240,6 +264,48 @@ MYTEST_CASE(dsp_find_peaks) {
     CHECK(has100);
     CHECK(has400);
     CHECK(has700);
+}
+
+// find_peaks 的契约：局部极大、高于 noise_floor + min_prominence、
+// **结果按频率升序**、max_peaks 截断。
+//
+// 注意"单音 + 平坦噪声底"下，噪声底附近的 bin 也可能满足"局部极大且高出 6 dB"，
+// 于是会返回若干假峰 —— 这是已知的设计取舍，所以这里**不**断言"只有 1 个峰"，
+// 只要求真峰存在且所有返回值是有限数。
+MYTEST_CASE(dsp_find_peaks_tone_contract) {
+    const double fs = 8000.0;
+    const double f0 = 1000.0;
+    Samples      x  = sine(f0, fs, 1024);
+
+    CHECK_OK_VALUE(s, my::dsp::welch(x, fs, 1024, 0.5f, my::dsp::Window::Hann));
+    CHECK_EQ(s.size(), std::size_t{1024 / 2 + 1});
+    // 1000 Hz 在 fs=8k、nfft=1024 下正好落在 bin 128
+    CHECK_EQ(s.peak_bin, std::size_t{128});
+    CHECK_NEAR(s.peak_freq, 1000.0, 1.0);
+    CHECK_NEAR(s.peak_db, 0.0, 0.5);  // 满幅单音 = 0 dBFS
+
+    const auto peaks = my::dsp::find_peaks(s);  // 默认 min_prominence_db = 6
+    CHECK(!peaks.empty());
+    CHECK(peaks.size() <= 8);  // max_peaks 默认 8
+
+    // 升序（实现最后按 freq 排序，不是按幅度）
+    for (std::size_t i = 1; i < peaks.size(); ++i) {
+        CHECK(peaks[i - 1].freq <= peaks[i].freq);
+    }
+
+    bool has_f0 = false;
+    for (const auto& p : peaks) {
+        CHECK(p.bin < s.db.size());
+        EXPECT(std::isfinite(p.freq));
+        EXPECT(std::isfinite(static_cast<double>(p.db)));
+        // 峰必须高于噪声底 + 最小突出度
+        EXPECT(p.db >= s.noise_floor_db + 6.0f - 1e-3f);
+        // Peak 的 bin/freq/db 必须和频谱一致
+        EXPECT_NEAR(s.freq_hz[p.bin], p.freq, 1e-9);
+        EXPECT(s.db[p.bin] == p.db);
+        if (std::fabs(p.freq - f0) <= 2.0) has_f0 = true;
+    }
+    CHECK(has_f0);
 }
 
 // -----------------------------------------------------------------------------
@@ -561,6 +627,86 @@ MYTEST_CASE(dsp_analyze_noise) {
     CHECK_EQ(static_cast<int>(c.modulation), static_cast<int>(my::dsp::Modulation::Noise));
 }
 
+// 构造一个"明显 PSK"的特征集（对应 analyze() 在 BPSK 上的典型输出）：
+// 恒定包络、瞬时频率有跳变（排除 CW）、但大部分时间相位不变（PSK 的判据）。
+MYTEST_CASE(dsp_classify_psk) {
+    my::dsp::Features f;
+    f.snr_db              = 20.0;
+    f.spectral_flatness   = 0.10;  // 单载波，不是噪声
+    f.envelope_cv         = 0.05;  // 恒定包络（排除 AM/ASK）
+    f.envelope_low_frac   = 0.02;
+    f.inst_freq_std       = 0.10;  // >= 0.02，排除 CW
+    f.inst_freq_quiet     = 0.75;  // 相位多数时间不变 -> PSK
+    f.inst_freq_two_level = 0.20;  // 不到 FSK 的 0.60
+
+    const auto c = my::dsp::classify(f);
+    CHECK_EQ(static_cast<int>(c.modulation), static_cast<int>(my::dsp::Modulation::PSK));
+    CHECK(c.confidence >= 0.8f);   // 离 0.50 的门限有 0.25 的裕量
+    CHECK(c.confidence <= 1.0f);
+    // classify 把输入特征原样带回来
+    CHECK_NEAR(c.features.inst_freq_quiet, 0.75, 1e-12);
+}
+
+// 落在判决树缝隙里的"四不像"：包络不够平（CW 不过），又没到 0.30（AM/ASK 不过），
+// 瞬时频率既没有双电平也不是持续调频 -> 兜底 Unknown，置信度显式给 0。
+MYTEST_CASE(dsp_classify_unknown) {
+    my::dsp::Features f;
+    f.snr_db              = 10.0;
+    f.spectral_flatness   = 0.20;
+    f.envelope_cv         = 0.20;  // 0.15 <= cv < 0.30：CW 与 AM/ASK 之间的缝
+    f.envelope_low_frac   = 0.10;
+    f.inst_freq_std       = 0.01;  // < 0.02，排除 FM
+    f.inst_freq_quiet     = 0.20;  // < 0.50，排除 PSK
+    f.inst_freq_two_level = 0.10;  // < 0.60，排除 FSK
+
+    const auto c = my::dsp::classify(f);
+    CHECK_EQ(static_cast<int>(c.modulation), static_cast<int>(my::dsp::Modulation::Unknown));
+    CHECK_NEAR(c.confidence, 0.0, 1e-12);
+}
+
+// 置信度：恒在 [0,1]，且明显不同的特征集给出明显不同的值。
+// margin_confidence(v, t, s) = clamp(0.5 + 0.5*|v-t|/s, 0, 1)。
+MYTEST_CASE(dsp_classify_confidence_range) {
+    my::dsp::Features psk;
+    psk.snr_db              = 20.0;
+    psk.spectral_flatness   = 0.10;
+    psk.envelope_cv         = 0.05;
+    psk.inst_freq_std       = 0.10;
+    psk.inst_freq_quiet     = 0.75;  // (0.75-0.50)/0.30 -> 0.9167
+    psk.inst_freq_two_level = 0.20;
+
+    my::dsp::Features fsk;  // 离 FSK 门限 0.60 只差 0.05
+    fsk.snr_db              = 20.0;
+    fsk.spectral_flatness   = 0.10;
+    fsk.envelope_cv         = 0.05;
+    fsk.inst_freq_std       = 0.10;
+    fsk.inst_freq_two_level = 0.65;  // (0.65-0.60)/0.30 -> 0.5833
+    fsk.inst_freq_quiet     = 0.10;
+
+    my::dsp::Features cw;  // 落在 CW 条件正中
+    cw.snr_db            = 20.0;
+    cw.spectral_flatness = 0.10;
+    cw.envelope_cv       = 0.0;
+    cw.inst_freq_std     = 0.0;
+
+    const auto a = my::dsp::classify(psk);
+    const auto b = my::dsp::classify(fsk);
+    const auto c = my::dsp::classify(cw);
+    CHECK_EQ(static_cast<int>(a.modulation), static_cast<int>(my::dsp::Modulation::PSK));
+    CHECK_EQ(static_cast<int>(b.modulation), static_cast<int>(my::dsp::Modulation::FSK));
+    CHECK_EQ(static_cast<int>(c.modulation), static_cast<int>(my::dsp::Modulation::CW));
+
+    for (float conf : {a.confidence, b.confidence, c.confidence}) {
+        EXPECT(std::isfinite(conf));
+        EXPECT(conf >= 0.0f);
+        EXPECT(conf <= 1.0f);
+    }
+    CHECK_NEAR(a.confidence, 0.9167, 1e-3);
+    CHECK_NEAR(b.confidence, 0.5833, 1e-3);
+    CHECK_NEAR(c.confidence, 1.0, 1e-6);  // 完全在 CW 中心：裕量饱和
+    CHECK(a.confidence > b.confidence + 0.25);  // 有区分度，不是常数
+}
+
 // -----------------------------------------------------------------------------
 //  解调
 // -----------------------------------------------------------------------------
@@ -662,6 +808,19 @@ MYTEST_CASE(dsp_demod_bpsk_bits_with_cfo) {
     CHECK_OK_VALUE(got, my::dsp::demod_bpsk(x, fs, rs));
     CHECK(got.size() >= bits.size() - 2);
     CHECK(ber(got, bits) < 0.02);
+}
+
+// 回归：sps 远大于样本数时，BPSK 的定时搜索会把 offset 推到信号长度之外。
+// 修复前 integrate_dump_complex 里 (x.size() - offset) 为负，转 size_t 是 UB，
+// 紧接着 reserve 一个巨大值会抛 length_error 穿透 Result 边界。
+// 现在 offset >= x.size() 直接返回空；所有定时候选都空 -> 走"符号数不足"分支
+// （实际错误码是 RuntimeError，不是 InvalidArgument）。
+MYTEST_CASE(dsp_demod_bpsk_huge_sps_no_crash) {
+    CSamples x(64, Complex(1.0f, 0.0f));  // 64 个样本，刚够过 "样本太少" 的检查
+
+    const auto r = my::dsp::demod_bpsk(x, /*sample_rate=*/1000.0, /*symbol_rate=*/1.0);
+    CHECK(!r.ok());
+    CHECK_EQ(r.status().code(), my::Errc::RuntimeError);
 }
 
 MYTEST_CASE(dsp_slice_bits) {

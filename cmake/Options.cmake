@@ -16,7 +16,16 @@ option(MYLIB_BUILD_TOOLS    "构建命令行工具（model_inspect 等）" ${MYL
 option(MYLIB_INSTALL       "生成安装规则（作为子目录嵌入时默认关闭，避免污染宿主工程的安装前缀）" ${MYLIB_IS_TOP_LEVEL})
 
 # 组件开关：按目标平台裁剪，例如 Zynq 上关掉 infer
-option(MYLIB_ENABLE_CORE  "核心组件（Status/Result/平台信息）" ON)
+#
+# 注意 MYLIB_ENABLE_CORE 不是"可选组件"：Status/Result/BuildInfo 是全部组件的地基，
+# 关掉之后什么都编不出来。以前它是个"看起来能关、关了什么也不会发生"的空开关
+# （构建摘要还会照常打印 core=ON），现在直接 fail-closed。
+option(MYLIB_ENABLE_CORE  "核心组件（Status/Result/平台信息）—— 恒为 ON，不可关闭" ON)
+if(NOT MYLIB_ENABLE_CORE)
+    message(FATAL_ERROR
+        "MYLIB_ENABLE_CORE=OFF 不受支持：core 提供 Status/Result/BuildInfo，"
+        "其余所有组件都依赖它。要裁剪体积请关掉具体组件（如 -DMYLIB_ENABLE_INFER=OFF）。")
+endif()
 option(MYLIB_ENABLE_LOG   "日志组件（封装 spdlog）"            ON)
 option(MYLIB_ENABLE_JSON  "JSON 组件（封装 nlohmann/json）"     ON)
 option(MYLIB_ENABLE_MATH  "数学组件（封装 Eigen）"             ON)
@@ -37,9 +46,9 @@ set(MYLIB_OPENCV_ROOT "" CACHE PATH "OpenCV 安装根目录（含 OpenCVConfig.c
 # 构建共享库而不是静态库（嵌入式默认静态）
 option(MYLIB_BUILD_SHARED "构建动态库" OFF)
 
-# 消毒器：空 / address（内存错误）/ undefined（未定义行为，trap 模式）
-set(MYLIB_SANITIZE "" CACHE STRING "消毒器：留空 / address / undefined")
-set_property(CACHE MYLIB_SANITIZE PROPERTY STRINGS "" address undefined)
+# 消毒器：空 / address（内存错误）/ undefined（未定义行为，trap 模式）/ thread（数据竞争）
+set(MYLIB_SANITIZE "" CACHE STRING "消毒器：留空 / address / undefined / thread")
+set_property(CACHE MYLIB_SANITIZE PROPERTY STRINGS "" address undefined thread)
 
 # 以 -fno-exceptions 编译本库（**只支持 core + math + dsp + net**，见文件末尾的校验）
 option(MYLIB_NO_EXCEPTIONS "以 -fno-exceptions 编译本库（只支持 core + math + dsp + net）" OFF)

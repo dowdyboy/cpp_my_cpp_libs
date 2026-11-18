@@ -87,7 +87,9 @@ MYLIB_API Vec3d euler_zyx(const Quatd& q) noexcept;
 MYLIB_API Mat4d make_transform(const Mat3d& rotation, const Vec3d& translation);
 
 /// 由齐次变换矩阵取旋转/平移
-MYLIB_API Result<Mat3d> transform_rotation(const Mat4d& transform) noexcept;
+/// 注意：不标 noexcept —— 失败路径要构造带消息的 Status（会分配），
+/// 标了 noexcept 就等于"内存不足时直接 terminate"，把可返回的错误变成崩溃。
+MYLIB_API Result<Mat3d> transform_rotation(const Mat4d& transform);
 MYLIB_API Vec3d     transform_translation(const Mat4d& transform) noexcept;
 
 // =============================================================================

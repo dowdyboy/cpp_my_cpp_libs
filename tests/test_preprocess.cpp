@@ -3,6 +3,7 @@
 #include <my_cpp_libs/infer/preprocess.hpp>
 
 #include <cmath>
+#include <limits>
 #include <vector>
 
 using namespace my::infer;
@@ -378,3 +379,105 @@ MYTEST_CASE(preprocess_nms_empty) {
     Box single{0, 0, 1, 1, 0.5f, 0};
     CHECK_EQ(nms({single}, 0.5f).size(), std::size_t{1});
 }
+
+// -----------------------------------------------------------------------------
+//  数值边界 / 重复框
+// -----------------------------------------------------------------------------
+// 极端量级：先减最大值再 exp，1e30 级输入不能上溢出成 inf/inf = NaN。
+MYTEST_CASE(preprocess_softmax_extreme_values) {
+    std::vector<float> v{1e30f, -1e30f, 0.0f};
+    CHECK_OK(softmax(v.data(), v.size()));
+    for (float x : v) CHECK(std::isfinite(x));
+    CHECK_NEAR(v[0], 1.0, 1e-6);  // exp(1e30-1e30) = 1
+    CHECK_NEAR(v[1], 0.0, 1e-6);  // exp(-2e30) 下溢成 0
+    CHECK_NEAR(v[2], 0.0, 1e-6);  // exp(-1e30) 下溢成 0
+    double sum = 0.0;
+    for (float x : v) sum += x;
+    CHECK_NEAR(sum, 1.0, 1e-6);
+
+    // 全相等且巨大：平移后全 0 -> 均匀分布（直接 exp(1e30) 会变成 inf/inf = NaN）
+    std::vector<float> u{1e30f, 1e30f, 1e30f, 1e30f};
+    CHECK_OK(softmax(u.data(), u.size()));
+    for (float x : u) {
+        CHECK(std::isfinite(x));
+        CHECK_NEAR(x, 0.25, 1e-6);
+    }
+
+    // NaN 输入：归一化因子非有限 -> RuntimeError（而不是静默写回 NaN 并报成功）
+    std::vector<float> nan_v{1.0f, std::numeric_limits<float>::quiet_NaN()};
+    const auto         st = softmax(nan_v.data(), nan_v.size());
+    CHECK(!st.ok());
+    CHECK_EQ(st.code(), my::Errc::RuntimeError);
+}
+
+// 重复框：IoU=1，第二个必须被抑制；同一位置不同类别则不互相抑制。
+// 注意 nms 的第二个参数是 **IoU 门限**，API 没有 max_output 参数：
+// 传 0 表示"只要重叠（IoU>0）就抑制"，不是"最多输出 0 个"。
+MYTEST_CASE(preprocess_nms_duplicate_boxes) {
+    std::vector<Box> dup{
+        {0, 0, 10, 10, 0.5f, 0},
+        {0, 0, 10, 10, 0.9f, 0},
+    };
+    const auto keep = nms(dup, 0.5f);
+    CHECK_EQ(keep.size(), std::size_t{1});
+    CHECK_NEAR(keep[0].score, 0.9, 1e-6);  // 排序后保留分数高的那个
+    CHECK_EQ(keep[0].label, 0);
+
+    // iou_threshold = 0：部分重叠的被抑制，不重叠的两个都留下
+    std::vector<Box> mixed{
+        {0, 0, 10, 10, 0.9f, 0},
+        {5, 5, 15, 15, 0.8f, 0},    // IoU = 25/175 > 0 -> 抑制
+        {50, 50, 60, 60, 0.7f, 0},  // 不重叠 -> 保留
+    };
+    const auto keep0 = nms(mixed, 0.0f);
+    CHECK_EQ(keep0.size(), std::size_t{2});
+    CHECK_NEAR(keep0[0].score, 0.9, 1e-6);
+    CHECK_NEAR(keep0[1].score, 0.7, 1e-6);
+
+    // 完全相同的框但类别不同：逐类别 NMS，两个都保留
+    std::vector<Box> cross{
+        {0, 0, 10, 10, 0.9f, 0},
+        {0, 0, 10, 10, 0.8f, 1},
+    };
+    CHECK_EQ(nms(cross, 0.5f).size(), std::size_t{2});
+
+    // 空输入配 0 门限也不能出问题
+    CHECK_EQ(nms({}, 0.0f).size(), std::size_t{0});
+}
+
+// 归一化参数校验的实际边界：
+//   * NormalizeSpec.mean/stddev 是 std::array<float,3>，长度在编译期固定，
+//     所以不存在"mean 长度不匹配"这种运行期错误；真正的长度约束是 channels<=3。
+//   * scale == 0 **不被拒绝**（实现只校验 stddev 非 0），结果是 (0-mean)/stddev 的常数图。
+MYTEST_CASE(preprocess_normalize_zero_scale) {
+    const float src[3] = {10.0f, 20.0f, 30.0f};
+
+    NormalizeSpec spec;
+    spec.layout = Layout::NCHW;
+    spec.scale  = 0.0f;
+    spec.mean   = {1.0f, 2.0f, 3.0f};
+    spec.stddev = {2.0f, 4.0f, 5.0f};
+
+    std::vector<float> out;
+    CHECK_OK(normalize(src, /*pixels=*/1, /*channels=*/3, spec, out));  // scale=0 合法
+    CHECK_EQ(out.size(), std::size_t{3});
+    CHECK_NEAR(out[0], -0.5, 1e-6);  // (10*0 - 1) / 2
+    CHECK_NEAR(out[1], -0.5, 1e-6);  // (20*0 - 2) / 4
+    CHECK_NEAR(out[2], -0.6, 1e-6);  // (30*0 - 3) / 5
+
+    // 实际的"长度/不良参数"校验：channels > 3 越界
+    CHECK_EQ(normalize(src, 3, 4, spec, out).code(), my::Errc::InvalidArgument);
+    CHECK_EQ(normalize(src, 3, 0, spec, out).code(), my::Errc::InvalidArgument);
+
+    // stddev 为 0 必须拒绝（只校验实际用到的通道）
+    NormalizeSpec zero_std = spec;
+    zero_std.stddev        = {0.0f, 1.0f, 1.0f};
+    CHECK_EQ(normalize(src, 3, 1, zero_std, out).code(), my::Errc::InvalidArgument);
+    // 注意：normalize 按 pixels*channels 读 src，channels=2 时需要 6 个 float。
+    // 这里必须给足长度的缓冲区，否则就是测试自己制造栈越界（ASan 抓到过）。
+    const float src6[6] = {10.0f, 20.0f, 30.0f, 40.0f, 50.0f, 60.0f};
+    zero_std.stddev     = {1.0f, 1.0f, 0.0f};
+    CHECK_OK(normalize(src6, 3, 2, zero_std, out));  // 第 3 个通道没用到 -> 不校验
+    CHECK_EQ(out.size(), std::size_t{6});
+}
+

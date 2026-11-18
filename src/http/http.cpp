@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <thread>
@@ -11,6 +12,24 @@
 
 namespace my::http {
 namespace {
+
+/// 当前线程的 handler 嵌套深度。>0 表示"我们正跑在 httplib 的 handler 里"。
+///
+/// 为什么需要它：httplib 0.66 的 handler 由线程池（默认 4 个 worker）执行，
+/// 而监听线程退出时会 `task_queue->shutdown()` **join 所有 worker**。
+/// 如果 worker 里的 handler 调 Server::stop() 并去 join 监听线程，
+/// 就形成"监听线程等 worker、worker 等监听线程"的循环等待 —— 死锁（实测确认）。
+/// 所以 handler 上下文里只能置停止标志 + detach，绝不能 join。
+thread_local int g_handler_depth = 0;
+
+struct HandlerScope {
+    HandlerScope() noexcept { ++g_handler_depth; }
+    ~HandlerScope() { --g_handler_depth; }
+    HandlerScope(const HandlerScope&)            = delete;
+    HandlerScope& operator=(const HandlerScope&) = delete;
+};
+
+bool in_handler_context() noexcept { return g_handler_depth > 0; }
 
 std::string to_lower(std::string_view s) {
     std::string out(s);
@@ -138,8 +157,10 @@ void Response::set_json(const my::json::Document& doc) {
 void Response::set_error(int code, std::string message) {
     status = code;
     my::json::Document doc;
-    doc.set("error", message);
-    doc.set("status", code);
+    // 路径是字面量，不可能失败；显式 (void) 表明这是有意的忽略
+    // （Status 现在是 [[nodiscard]]，不写 (void) 会告警）
+    (void)doc.set("error", message);
+    (void)doc.set("status", code);
     set_json(doc);
 }
 
@@ -169,17 +190,56 @@ Result<Client> Client::create(const ClientOptions& options) {
     url = url.substr(7);
     while (!url.empty() && url.back() == '/') url.pop_back();
 
-    std::string host = url;
-    int         port = 80;
-    const auto  colon = url.rfind(':');
-    if (colon != std::string::npos && url.find(']') == std::string::npos) {
-        host = url.substr(0, colon);
-        try {
-            port = std::stoi(url.substr(colon + 1));
-        } catch (...) {
-            return Status(Errc::ParseError, "端口不是数字: " + url.substr(colon + 1));
+    // ---- host[:port] 解析 ----
+    // IPv6 字面量形如 [::1]:8080，冒号有好几个：必须先定位 ']'、只在 ']' 之后找端口
+    // 分隔的 ':'。原来的写法是"只要出现过 ']' 就整块跳过端口解析"，于是
+    // "http://[::1]:8080" 会被当成主机名 "[::1]:8080" + 端口 80 —— 静默连到错误地址。
+    std::string host;
+    int         port      = 80;
+    std::string port_text;
+    bool        has_port  = false;
+
+    if (!url.empty() && url.front() == '[') {
+        const auto close = url.find(']');
+        if (close == std::string::npos) {
+            return Status(Errc::InvalidArgument,
+                          "base_url 的 IPv6 地址缺少 ']': " + options.base_url);
         }
-        if (port <= 0 || port > 65535) return Status(Errc::OutOfRange, "端口越界");
+        host            = url.substr(1, close - 1);   // 去掉方括号再交给 getaddrinfo
+        const auto rest = url.substr(close + 1);
+        if (!rest.empty()) {
+            if (rest.front() != ':') {
+                return Status(Errc::InvalidArgument,
+                              "base_url 的 IPv6 地址后面只能接 :port: " + options.base_url);
+            }
+            has_port  = true;
+            port_text = rest.substr(1);
+        }
+    } else {
+        const auto colon = url.rfind(':');
+        host             = (colon == std::string::npos) ? url : url.substr(0, colon);
+        if (colon != std::string::npos) {
+            has_port  = true;
+            port_text = url.substr(colon + 1);
+        }
+    }
+
+    if (has_port) {
+        // 注意不能只靠 std::stoi：它会把 "8080abc" 当成 8080 收下，
+        // 所以用 consumed 校验整段都是数字。
+        std::size_t consumed = 0;
+        if (port_text.empty()) {
+            return Status(Errc::ParseError, "base_url 的端口为空: " + options.base_url);
+        }
+        try {
+            port = std::stoi(port_text, &consumed);
+        } catch (...) {
+            return Status(Errc::OutOfRange, "端口不是合法数字: " + port_text);
+        }
+        if (consumed != port_text.size()) {
+            return Status(Errc::ParseError, "端口含非数字字符: " + port_text);
+        }
+        if (port <= 0 || port > 65535) return Status(Errc::OutOfRange, "端口越界: " + port_text);
     }
     if (host.empty()) return Status(Errc::InvalidArgument, "base_url 缺少主机名");
     if (host.find('/') != std::string::npos) {
@@ -268,6 +328,9 @@ struct Server::Impl {
     std::atomic<bool>       running{false};
     std::atomic<bool>       stopped{false};   ///< stop() 主动停止 vs 真正的监听失败
     std::uint16_t           bound_port = 0;
+    /// 保护 thread 的 joinable()/join()/detach()：并发 stop() 会让两个线程
+    /// 同时对同一个 joinable thread 调 join()（未定义行为）
+    std::mutex              thread_mutex;
 };
 
 Server::Server() = default;
@@ -326,12 +389,18 @@ Status Server::route(const std::string& method, const std::string& path, Handler
         for (const auto& kv : req.path_params) r.params.emplace_back(kv.first, kv.second);
 
         Response out;
-        try {
-            h(r, out);
-        } catch (const std::exception& e) {
-            out.set_error(500, std::string("handler 抛异常: ") + e.what());
-        } catch (...) {
-            out.set_error(500, "handler 抛未知异常");
+        {
+            // 标记"当前线程正在执行 handler"：stop() 需要据此判断能不能 join。
+            // httplib 的 handler 跑在**线程池的 worker** 上，不是监听线程，
+            // 所以"线程 id == 监听线程 id"这种判断是不够的。
+            HandlerScope scope;
+            try {
+                h(r, out);
+            } catch (const std::exception& e) {
+                out.set_error(500, std::string("handler 抛异常: ") + e.what());
+            } catch (...) {
+                out.set_error(500, "handler 抛未知异常");
+            }
         }
 
         res.status = out.status;
@@ -366,23 +435,46 @@ Status Server::route(const std::string& method, const std::string& path, Handler
     return Ok();
 }
 
+/// 便捷重载（void 版）失败时的上报出口。
+///
+/// 这六个 void 重载唯一可能的失败是"Server 未创建"（方法名是字面量，不会走到
+/// Unsupported 分支）。以前用 `(void)route(...)` 静默丢掉，于是
+/// `Server s; s.get("/x", h);` 这种用法看起来注册成功、实际什么都没发生。
+/// 现在至少往 stderr 留一行，配合 Status 的 [[nodiscard]] 能早发现。
+void report_route_failure(const Status& st, const char* method, const std::string& path) {
+    std::fprintf(stderr, "[my_cpp_libs] Server::%s(\"%s\") 路由注册失败: %s\n", method,
+                 path.c_str(), st.to_string().c_str());
+}
+
 void Server::get(const std::string& path, Handler handler) {
-    (void)route("GET", path, std::move(handler));
+    if (auto st = route("GET", path, std::move(handler)); !st) {
+        report_route_failure(st, "get", path);
+    }
 }
 void Server::post(const std::string& path, Handler handler) {
-    (void)route("POST", path, std::move(handler));
+    if (auto st = route("POST", path, std::move(handler)); !st) {
+        report_route_failure(st, "post", path);
+    }
 }
 void Server::put(const std::string& path, Handler handler) {
-    (void)route("PUT", path, std::move(handler));
+    if (auto st = route("PUT", path, std::move(handler)); !st) {
+        report_route_failure(st, "put", path);
+    }
 }
 void Server::patch(const std::string& path, Handler handler) {
-    (void)route("PATCH", path, std::move(handler));
+    if (auto st = route("PATCH", path, std::move(handler)); !st) {
+        report_route_failure(st, "patch", path);
+    }
 }
 void Server::del(const std::string& path, Handler handler) {
-    (void)route("DELETE", path, std::move(handler));
+    if (auto st = route("DELETE", path, std::move(handler)); !st) {
+        report_route_failure(st, "del", path);
+    }
 }
 void Server::options(const std::string& path, Handler handler) {
-    (void)route("OPTIONS", path, std::move(handler));
+    if (auto st = route("OPTIONS", path, std::move(handler)); !st) {
+        report_route_failure(st, "options", path);
+    }
 }
 
 Status Server::set_mount_point(const std::string& mount_point, const std::string& dir) {
@@ -412,7 +504,10 @@ Status Server::listen_async() {
     if (!impl_->running.compare_exchange_strong(expected, true)) return Ok();
 
     // 上一次的后台线程如果已经自然结束，先回收，否则对 joinable thread 赋值 = terminate
-    if (impl_->thread.joinable()) impl_->thread.join();
+    {
+        std::lock_guard<std::mutex> lock(impl_->thread_mutex);
+        if (impl_->thread.joinable()) impl_->thread.join();
+    }
 
     impl_->stopped = false;
     impl_->thread  = std::thread([impl = impl_.get()] {
@@ -436,6 +531,28 @@ void Server::stop() {
     if (!impl_) return;
     impl_->stopped = true;
     impl_->svr.stop();
+
+    // 关键判定：handler 上下文（线程池 worker）里绝不能 join 监听线程，
+    // 否则就是"worker 等监听线程、监听线程 join 所有 worker"的循环等待（实测死锁）。
+    const bool from_handler = in_handler_context();
+    const bool self_thread  = impl_->thread.joinable() &&
+                             impl_->thread.get_id() == std::this_thread::get_id();
+
+    if (from_handler || self_thread) {
+        // detach 路径连互斥锁都用 try_lock：如果另一个线程正拿着锁 join 收尾，
+        // 我们在这里**阻塞**就会再次形成同样的环（它等监听线程，监听线程等我们）。
+        // 拿不到锁就直接返回 —— 那边的 join 会把线程收干净。
+        std::unique_lock<std::mutex> lock(impl_->thread_mutex, std::try_to_lock);
+        if (lock.owns_lock() && impl_->thread.joinable()) {
+            // detach 之后 running 由监听线程在退出时自己置 false，
+            // 于是外部"等到 running()==false"就等价于"监听线程真的退出了"，
+            // 此时才允许析构 Server（detach 路径下唯一的生命周期约定）。
+            impl_->thread.detach();
+        }
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(impl_->thread_mutex);
     if (impl_->thread.joinable()) impl_->thread.join();
     impl_->running = false;
 }
