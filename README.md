@@ -49,23 +49,27 @@ my_cpp_libs_copy_runtime_dlls(app)   # 仅 Windows
 
 ### 自己重新打包（可复现）
 
-```powershell
-# Windows / MSVC 全量包
-cmake -S . -B build/pkg-msvc -A x64 -DMYLIB_BUILD_EXAMPLES=OFF -DMYLIB_BUILD_TESTS=OFF `
-      -DMYLIB_BUILD_TOOLS=OFF -DMYLIB_ENABLE_CV=ON -DMYLIB_ENABLE_NCNN=ON `
-      -DMYLIB_PACKAGE_SUFFIX=win-x64-msvc
-cmake --build build/pkg-msvc --config Release
-cpack --config build/pkg-msvc/CPackConfig.cmake -C Release -B dist
+**一条命令**（本机装齐四套工具链时，生成带 ORT/OpenCV 的全量包 + 逐个解包验证）：
 
-# Linux 交叉包（armv7 / aarch64 同理，换 toolchain 与后缀即可）
-cmake -S . -B build/pkg-armv7 -G Ninja `
-      -DCMAKE_MAKE_PROGRAM=<ninja 路径> `
-      -DCMAKE_TOOLCHAIN_FILE=$PWD/cmake/toolchains/linux-armv7-zynq.cmake `
-      -DCMAKE_BUILD_TYPE=Release -DMYLIB_BUILD_EXAMPLES=OFF -DMYLIB_BUILD_TESTS=OFF `
-      -DMYLIB_BUILD_TOOLS=OFF -DMYLIB_ENABLE_CV=ON -DMYLIB_PACKAGE_SUFFIX=linux-armv7-glibc239
-cmake --build build/pkg-armv7
-cpack --config build/pkg-armv7/CPackConfig.cmake -B dist
+```powershell
+.\scripts\package-all.ps1          # 四个包 → dist/
+.\scripts\verify-package.ps1 -Package dist\my_cpp_libs-0.1.4-win-x64-msvc.zip
 ```
+
+CI 里也有两个 `package-*` job（`package-linux` / `package-windows`）跑同一套 CPack 流程，
+但**只带 CI 能拿到的依赖**，所以包名带后缀说明内含：
+
+| 包名 | 来源 | 内含 |
+|---|---|---|
+| `win-x64-msvc` | 本机 `package-all.ps1` | ORT + OpenCV + ncnn |
+| `win-x64-msvc-ort` | CI `package-windows` | ORT，无 OpenCV/ncnn |
+| `linux-*-glibcNNN` | 本机 | ORT + OpenCV |
+| `linux-*-glibcNNN-basic` | CI `package-linux` | 无 ORT/OpenCV（交叉预编译包不进 CI 依赖） |
+| `win-x64-mingw-basic` | 本机/CI | 无 ORT/OpenCV（ABI 不兼容） |
+
+包名后缀是**显式参数**而不是猜出来的：glibc 版本 CMake 推不出来，必须由构建者给，
+否则很容易把"能编"误当成"能上板"。打包时缺任何三方许可证会打印
+`[pkg] 找不到许可证 ...` —— 出现这行就说明这个包不该发布。
 
 > 包名后缀是**显式参数**而不是猜出来的：glibc 版本 CMake 推不出来，必须由构建者给，
 > 否则很容易把"能编"误当成"能上板"。打包脚本在缺任何三方许可证时会打印

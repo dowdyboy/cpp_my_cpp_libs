@@ -142,6 +142,111 @@ std::vector<Burst> detect_bursts(const Samples& x, std::size_t window, float thr
 }
 
 // -----------------------------------------------------------------------------
+//  CFAR 检测
+// -----------------------------------------------------------------------------
+double cfar_ca_alpha(std::size_t train_cells, double pfa) {
+    if (train_cells == 0 || !(pfa > 0.0 && pfa < 1.0)) return 0.0;
+    const double n = 2.0 * static_cast<double>(train_cells);
+    return n * (std::pow(pfa, -1.0 / n) - 1.0);
+}
+
+namespace {
+
+/// dBFS -> 线性功率。Spectrum::db 的 0 dB 是"满幅正弦"，功率域用 10^(db/10)
+/// 就得到相对满幅的功率；CFAR 只用相对量，归一化常数会同时出现在门限里。
+double db_to_power(float db) {
+    return std::pow(10.0, static_cast<double>(db) / 10.0);
+}
+
+/// CA / OS 共用的扫描骨架。ordered=false 取参考窗的平均功率，true 取第 rank 小。
+///
+/// 两端各 half = guard_cells + train_cells 个 bin 没有完整参考窗，直接不参与检测
+/// （docs/08 §11 写明了这条约定）。参考窗最多 2*train_cells 个 float，
+/// 整帧复用同一块，不在循环里分配。
+std::vector<Detection> cfar_scan(const Spectrum& s, const CfarOptions& opt, bool ordered) {
+    std::vector<Detection> out;
+    const std::size_t      n = s.db.size();
+    if (n == 0 || n != s.freq_hz.size()) return out;
+    if (opt.train_cells == 0) return out;
+    if (!(opt.pfa > 0.0 && opt.pfa < 1.0)) return out;
+    // 先保证 train <= n，后面的 n - train 才不会回绕。
+    if (opt.train_cells > n) return out;
+    if (opt.guard_cells > n - opt.train_cells) return out;
+
+    const std::size_t half = opt.guard_cells + opt.train_cells;  // <= n，不会溢出
+    if (half > (n - 1) / 2) return out;  // 连一个完整参考窗都放不下
+
+    const std::size_t nref  = 2 * opt.train_cells;
+    const double      alpha = cfar_ca_alpha(opt.train_cells, opt.pfa);
+    if (!(alpha > 0.0)) return out;
+
+    // OS 的 rank 是 1-based（0 = 自动 ceil(3N/4)）。超范围时夹到 [1, N]：
+    // 一个可夹的 rank 不值得把整帧判成非法。
+    std::size_t rank = opt.os_rank;
+    if (rank == 0) rank = nref - nref / 4;  // ceil(3N/4)，避免 3*N 溢出
+    if (rank > nref) rank = nref;
+
+    // min_snr_db 是功率 dB，线性域余量 = 10^(x/10)；<= 0 时不额外抬高。
+    const double margin = (opt.min_snr_db > 0.0f)
+                              ? std::pow(10.0, static_cast<double>(opt.min_snr_db) / 10.0)
+                              : 1.0;
+
+    std::vector<float> ref(nref);
+    bool               in_run = false;
+    Detection          best;
+
+    for (std::size_t k = half; k + half < n; ++k) {
+        // 参考窗：左侧 [k-half, k-guard)，右侧 (k+guard, k+half]，保护单元留在中间。
+        std::size_t m = 0;
+        for (std::size_t i = k - half; i < k - opt.guard_cells; ++i) {
+            ref[m++] = static_cast<float>(db_to_power(s.db[i]));
+        }
+        for (std::size_t i = k + opt.guard_cells + 1; i <= k + half; ++i) {
+            ref[m++] = static_cast<float>(db_to_power(s.db[i]));
+        }
+
+        double noise_power = 0.0;
+        if (ordered) {
+            const std::size_t idx = rank - 1;  // 第 rank 小 -> 0-based 下标
+            std::nth_element(ref.begin(),
+                             ref.begin() + static_cast<std::ptrdiff_t>(idx), ref.end());
+            noise_power = static_cast<double>(ref[idx]);
+        } else {
+            double sum = 0.0;
+            for (float p : ref) sum += static_cast<double>(p);
+            noise_power = sum / static_cast<double>(nref);
+        }
+
+        const double threshold = alpha * noise_power * margin;
+        const float  thr_db    = detail::power_to_db(static_cast<float>(threshold));
+        if (s.db[k] > thr_db) {
+            // 连续超门限的 bin 归成一个检测，保留其中最强（db 最大）的那个。
+            if (!in_run || s.db[k] > best.db) {
+                const float snr_db =
+                    s.db[k] - detail::power_to_db(static_cast<float>(noise_power));
+                best = Detection{k, s.freq_hz[k], s.db[k], thr_db, snr_db};
+            }
+            in_run = true;
+        } else if (in_run) {
+            out.push_back(best);
+            in_run = false;
+        }
+    }
+    if (in_run) out.push_back(best);
+    return out;
+}
+
+}  // namespace
+
+std::vector<Detection> ca_cfar(const Spectrum& s, const CfarOptions& opt) {
+    return cfar_scan(s, opt, /*ordered=*/false);
+}
+
+std::vector<Detection> os_cfar(const Spectrum& s, const CfarOptions& opt) {
+    return cfar_scan(s, opt, /*ordered=*/true);
+}
+
+// -----------------------------------------------------------------------------
 //  特征
 // -----------------------------------------------------------------------------
 Result<Features> analyze(const Samples& x, double sample_rate) {

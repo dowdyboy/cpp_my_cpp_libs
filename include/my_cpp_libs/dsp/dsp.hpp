@@ -108,6 +108,47 @@ MYLIB_API std::vector<Peak> find_peaks(const Spectrum& s, float min_prominence_d
 /// 信噪比粗估（dB）：最强峰功率 - 噪声底。信号本身弱于噪声底时返回 0。
 MYLIB_API float estimate_snr_db(const Spectrum& s);
 
+// -----------------------------------------------------------------------------
+//  CFAR 检测
+// -----------------------------------------------------------------------------
+/// CFAR（恒虚警率）检测：门限随局部噪声自适应，不需要人为给"高出噪声底多少"。
+enum class CfarKind { CellAveraging, OrderedStatistic };
+
+struct CfarOptions {
+    std::size_t guard_cells = 2;   ///< 被测单元两侧各留多少保护单元（不计入噪声估计）
+    std::size_t train_cells = 8;   ///< 每侧的参考单元数（总参考单元 N = 2*train_cells）
+    double      pfa         = 1e-4;///< 期望虚警概率（CA 用；OS 复用同一 alpha，见文档说明）
+    std::size_t os_rank     = 0;   ///< OS-CFAR 取第几小的参考单元（0 = 自动取 ceil(3N/4)）
+    float       min_snr_db  = 0.0f;///< 额外的绝对余量（dB），叠加在 CFAR 门限上
+};
+
+struct Detection {
+    std::size_t bin          = 0;
+    double      freq         = 0.0;   ///< Hz
+    float       db           = 0.0f;  ///< 该 bin 的 dBFS
+    float       threshold_db = 0.0f;  ///< 本次判决用的门限（dBFS）
+    float       snr_db       = 0.0f;  ///< db - 局部噪声估计（dB）
+};
+
+/// CA-CFAR：用两侧参考单元的**平均功率**估计背景。
+/// 返回的是"超门限的局部极大"（相邻超门限 bin 合并为一个，取其中最强的 bin），
+/// 而不是逐 bin 输出 —— 谱峰通常跨 2~3 个 bin，逐 bin 输出对使用者没有意义。
+///
+/// 约定：
+///   * 谱两端各 `guard_cells + train_cells` 个 bin 没有完整参考窗，直接不参与检测；
+///   * 参数非法（`train_cells == 0`、`pfa` 不在 (0,1)、参考窗放不下）返回空表，不抛异常。
+MYLIB_API std::vector<Detection> ca_cfar(const Spectrum& s, const CfarOptions& opt = {});
+
+/// OS-CFAR：用第 rank 小的参考单元做背景估计。
+/// 强干扰落在参考窗里时比 CA 稳（经典场景：弱目标紧邻强干扰）。
+/// `os_rank` 是 1-based 的"第几小"；0 表示自动取 ceil(3N/4)。超范围时夹到 [1, N]。
+/// 输出与 CA 相同：相邻超门限 bin 合并，取其中最强的 bin。
+MYLIB_API std::vector<Detection> os_cfar(const Spectrum& s, const CfarOptions& opt = {});
+
+/// CA-CFAR 的门限系数（线性域）：alpha = N * (pfa^(-1/N) - 1)，N = 2*train_cells。
+/// 暴露出来是为了让调用方/测试能直接核这条公式。参数非法时返回 0。
+MYLIB_API double cfar_ca_alpha(std::size_t train_cells, double pfa);
+
 // =============================================================================
 //  滤波器
 // =============================================================================

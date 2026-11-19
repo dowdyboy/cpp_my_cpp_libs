@@ -1,5 +1,82 @@
 # 变更记录
 
+## 0.1.5（2026-11-19）—— 发版闭环（CI 打包）+ CFAR 检测器
+
+两件事，对应上一轮评估里"按投入产出排"的前两项。
+
+### 1. 打包搬进 CI（发版闭环的最后一块）
+
+0.1.3 起 SDK 包由 CPack 生成，但一直是**本机手工跑** `package-all.ps1` —— 也就是"四个包"
+依赖这台机器恰好装了四套工具链，而且那两个脚本躺在被 gitignore 的 `assess/` 里。
+
+- `package-all.ps1` / `verify-package.ps1` **移进 `scripts/`**（随之入库），
+  `$root` 改成从 `$PSScriptRoot` 推，不再写死本机绝对路径；
+- CI 新增两个 job：
+  - `package-linux`：matrix{armv7, aarch64}，apt 交叉工具链 + CPack → `.tar.gz`；
+  - `package-windows`：MSVC + CPack → `.zip`。
+- 两个 job 的验收都是"**cpack → 解包 → 用包里的 Config 编一个外部工程**"，
+  Windows 侧还会把 `sdk_consumer` 真跑一遍；
+- 包名如实反映内含（CI 拿不到 OpenCV 的预编译包）：
+
+| 包名 | 来源 | 内含 |
+|---|---|---|
+| `win-x64-msvc` | 本机 | ORT + OpenCV + ncnn |
+| `win-x64-msvc-ort` | CI | ORT，无 OpenCV/ncnn |
+| `linux-<arch>-glibc<NNN>` | 本机 | ORT + OpenCV |
+| `linux-<arch>-glibc<NNN>-basic` | CI | 无 ORT/OpenCV |
+
+> 意义：打包配方现在是 PR 级别可回归的 —— 改坏 install 规则，CI 当场红；
+> 而带 ORT+OpenCV 的全量 release 资产仍由本机脚本生成（命名不同，不会混）。
+
+### 2. CFAR 检测器（`ca_cfar` / `os_cfar`）
+
+§10 定稿 `find_peaks` 时暴露了它的根本限制：门限是"相对全谱中位数"的绝对值，
+**不知道局部噪声有多高**。调高 `min_prominence_db` 只是用同一把尺子量整条谱。
+
+CFAR 换了个问法：每个被测 bin 用自己的邻域估计噪声，调用方给**期望虚警概率 `pfa`**。
+
+```cpp
+my::dsp::CfarOptions opt;              // guard=2, train=8, pfa=1e-4
+auto det = my::dsp::ca_cfar(s, opt);   // 平均功率
+auto os  = my::dsp::os_cfar(s, opt);   // 第 rank 小的参考单元
+// Detection{ bin, freq, db, threshold_db, snr_db }
+```
+
+- 门限系数 `alpha = N * (pfa^(-1/N) - 1)`（N = 2*train）单独暴露为 `cfar_ca_alpha()`，
+  便于调用方核算与调参：`alpha(8, 1e-4) = 12.45`（10.95 dB），`alpha(8, 1e-2) = 5.34`（7.27 dB）；
+- 谱两端各 `guard+train` 个 bin 没有完整参考窗，不参与检测（文档写明）；
+- 相邻超门限 bin 合并成一个检测（取最强 bin）——谱峰跨 2~3 个 bin，逐 bin 输出没意义；
+- 功率域计算、参考窗复用同一块缓冲，循环里不分配；
+- 参数非法返回空表（dsp 在 `-fno-exceptions` 子集里，不写 try/catch）。
+
+实测（x64，8192 点 / nfft=4096 / 3 段平均）：
+
+| 场景 | 结果 |
+|---|---|
+| 单音（1 kHz, SNR 20 dB） | CA 检出 bin 128，门限 -33.87 dBFS，局部 SNR 44.8 dB |
+| 纯噪声，pfa=1e-4 | **0 个虚警** |
+| 纯噪声，pfa=0.1 | 59 个（pfa 真的在控制虚警） |
+| **弱音（-40 dB）紧邻强音（0 dB，间隔 4 bin）** | **CA 漏检**（门限被强音泄漏抬到 +0.68 dBFS）；**OS 检出**（-39.86 dBFS，门限 -59.67 dBFS）|
+
+最后一行就是 OS-CFAR 存在的理由，测试把它钉住了。
+
+### 用例与文档
+
+- 新增 7 条 CFAR 用例（alpha 公式、单音、纯噪声 pfa 对比、OS vs CA、边缘、非法参数、余量）；
+  总用例 266 → **273**；
+- `docs/08` 新增 §11「CFAR 检测」（CA/OS 选择建议、alpha 数值例、边缘约定、已知限制：
+  OS 复用 CA 的 alpha 属保守近似、极短谱无法检测）；
+- `docs/03` 新增 §4.4.1「CI 打包 job」；README 的 SDK 包表补上来源与内含对照。
+
+### 验证矩阵
+
+| 配置 | 结果 |
+|---|---|
+| MinGW x64 Release | **275/275**（273 用例 + 2 守卫），零告警 |
+| Linux Debug / ASan / TSan | 见 CI（14 个 job，含 qemu-test 两个 ARM 真跑） |
+| `-fno-exceptions` | CFAR 实现无 try/catch，子集里语法检查通过 |
+| CI 打包 job | 新增，随本版首跑验证 |
+
 ## 0.1.4（2026-11-19）—— find_peaks 语义定稿
 
 ### 问题

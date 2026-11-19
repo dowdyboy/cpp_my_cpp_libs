@@ -49,6 +49,23 @@ void add_awgn(Samples& x, double snr_db, std::uint32_t seed) {
     for (auto& v : x) v = static_cast<float>(static_cast<double>(v) + dist(rng));
 }
 
+/// 手工构造一条"平坦噪声底 + 若干尖峰"的谱。
+/// CFAR 用例要精确控制尖峰落在哪个 bin、幅度多少，走 Welch 反而不好构造。
+my::dsp::Spectrum flat_spectrum(std::size_t n, float floor_db) {
+    my::dsp::Spectrum s;
+    s.sample_rate = 6400.0;
+    s.nfft        = n;
+    s.freq_hz.resize(n);
+    s.db.assign(n, floor_db);
+    for (std::size_t k = 0; k < n; ++k) {
+        s.freq_hz[k] = static_cast<float>(static_cast<double>(k) * s.sample_rate /
+                                          static_cast<double>(n));
+    }
+    s.noise_floor_db = floor_db;
+    s.peak_db        = floor_db;
+    return s;
+}
+
 /// 归一化互相关（衡量"解调出来的波形是不是那根正弦"）
 double correlation(const Samples& a, const Samples& b) {
     const std::size_t n = std::min(a.size(), b.size());
@@ -414,6 +431,189 @@ MYTEST_CASE(dsp_find_peaks_noise_gate_limitation) {
     CHECK_EQ(with_tone.size(), std::size_t{1});
     CHECK_NEAR(with_tone[0].freq, 700.0, 10.0);
 }
+
+// -----------------------------------------------------------------------------
+//  CFAR
+// -----------------------------------------------------------------------------
+MYTEST_CASE(dsp_cfar_ca_alpha_formula) {
+    // alpha = N*(pfa^(-1/N)-1)，N = 2*train_cells
+    const double expected = 16.0 * (std::pow(1e-4, -1.0 / 16.0) - 1.0);
+    const double alpha    = my::dsp::cfar_ca_alpha(8, 1e-4);
+    CHECK_NEAR(alpha, expected, 1e-9 * expected);  // 相对 1e-9
+    CHECK_NEAR(alpha, 12.45247056, 1e-6);          // 手算值
+    CHECK_NEAR(10.0 * std::log10(alpha), 10.95, 0.01);  // 约 11 dB
+
+    // 虚警率放宽 -> 门限系数变小（门限更低，检出更多）
+    const double loose = my::dsp::cfar_ca_alpha(8, 1e-2);
+    CHECK(loose < alpha);
+    CHECK_NEAR(loose, 16.0 * (std::pow(1e-2, -1.0 / 16.0) - 1.0), 1e-9 * loose);
+}
+
+MYTEST_CASE(dsp_cfar_ca_finds_tone) {
+    const double fs = 8000.0;
+    const double f0 = 1000.0;
+    Samples      x  = sine(f0, fs, 4096);
+    add_awgn(x, 20.0, 42);
+
+    CHECK_OK_VALUE(s, my::dsp::welch(x, fs, 1024, 0.5f, my::dsp::Window::Hann));
+    const auto det = my::dsp::ca_cfar(s);
+
+    const my::dsp::Detection* tone = nullptr;
+    for (const auto& d : det) {
+        if (std::fabs(d.freq - f0) <= 20.0) tone = &d;
+    }
+    CHECK(tone != nullptr);              // 1 kHz 附近的峰必须被检出
+    CHECK_EQ(tone->bin, s.peak_bin);
+    CHECK_NEAR(tone->db, 0.0, 1.0);      // 满幅单音 + 20 dB SNR，峰约 0 dBFS
+    CHECK(tone->threshold_db < tone->db - 10.0f);  // 门限明显低于峰
+    CHECK(tone->snr_db > 10.0f);
+}
+
+MYTEST_CASE(dsp_cfar_ca_noise_only_low_pfa) {
+    // 纯噪声谱：pfa 应当真的在控制虚警数量，而不是摆设。
+    // 用 nfft=4096（8192 点 -> 只有 3 段平均）复现 docs/08 §10.4 说的"段数少"场景：
+    // 此时噪声 bin 的起伏才足以让 pfa=0.1 产生可观虚警。
+    const double fs = 8000.0;
+    Samples      x(8192);
+    std::mt19937 rng(2025);
+    std::normal_distribution<float> dist(0.0f, 0.1f);
+    for (auto& v : x) v = dist(rng);
+
+    CHECK_OK_VALUE(s, my::dsp::welch(x, fs, 4096, 0.5f, my::dsp::Window::Hann));
+
+    my::dsp::CfarOptions strict;
+    strict.pfa = 1e-4;
+    const auto low = my::dsp::ca_cfar(s, strict);
+    CHECK(low.size() <= 2u);  // 期望虚警 ~1e-4 × ~2029 个可用 bin
+
+    my::dsp::CfarOptions loose;
+    loose.pfa = 0.1;
+    const auto high = my::dsp::ca_cfar(s, loose);
+    CHECK(high.size() > low.size());
+    CHECK(high.size() >= 10u);  // 10% 虚警率在 ~2029 个 bin 上应给出可观数量
+}
+
+MYTEST_CASE(dsp_cfar_os_beats_ca_next_to_strong_interferer) {
+    // 弱音（-40 dB）紧邻强音（0 dB，间隔 4 个 bin）。
+    // CA 的参考窗把强音平均进来 -> 门限被抬到 0 dB 以上，弱音漏检；
+    // OS 取第 12 小的参考单元，被强音污染的大值排不到第 12 位，仍能检出弱音。
+    // 噪声取 3e-3：让局部噪声估计压过强音在 2 个 bin 外的窗泄漏，避免两个超门限
+    // 区段连成一片（那样合并后只剩强音那个检测，看不出 OS 的优势）。
+    const double fs       = 8000.0;
+    const double f_strong = 1000.0;
+    const double f_weak   = 1031.25;  // nfft=1024 时 4 个 bin = 31.25 Hz
+
+    Samples      x(4096);
+    std::mt19937 rng(31);
+    std::normal_distribution<float> noise(0.0f, 3e-3f);
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        const double t = static_cast<double>(i) / fs;
+        x[i] = static_cast<float>(std::sin(2.0 * kPi * f_strong * t) +
+                                  0.01 * std::sin(2.0 * kPi * f_weak * t)) +
+               noise(rng);
+    }
+
+    CHECK_OK_VALUE(s, my::dsp::welch(x, fs, 1024, 0.5f, my::dsp::Window::Hann));
+
+    const auto ca = my::dsp::ca_cfar(s);
+    const auto os = my::dsp::os_cfar(s);
+
+    auto has_near = [](const std::vector<my::dsp::Detection>& v, double hz, double tol) {
+        for (const auto& d : v) {
+            if (std::fabs(d.freq - hz) <= tol) return true;
+        }
+        return false;
+    };
+
+    CHECK(has_near(ca, f_strong, 20.0));  // 强音两者都能检出
+    CHECK(!has_near(ca, f_weak, 20.0));   // CA：参考窗吃进强音 -> 弱音漏检
+    CHECK(has_near(os, f_weak, 20.0));    // OS：rank 统计忽略强音 -> 仍能检出
+
+    const my::dsp::Detection* weak = nullptr;
+    for (const auto& d : os) {
+        if (std::fabs(d.freq - f_weak) <= 20.0) weak = &d;
+    }
+    CHECK(weak != nullptr);
+    CHECK_NEAR(weak->db, -40.0, 3.0);
+    CHECK(weak->threshold_db < weak->db - 10.0f);
+    CHECK(weak->snr_db > 10.0f);
+}
+
+MYTEST_CASE(dsp_cfar_edges_skipped) {
+    // 两端各 guard+train = 10 个 bin 没有完整参考窗，直接不参与检测。
+    const std::size_t n = 64;
+    my::dsp::Spectrum s = flat_spectrum(n, -100.0f);
+    s.db[5]             = -10.0f;  // bin < 10：边缘，不检测
+    s.db[30]            = -10.0f;  // 中间：检测
+    s.db[60]            = -10.0f;  // bin > 64-1-10：边缘，不检测
+
+    const auto det = my::dsp::ca_cfar(s);
+    CHECK_EQ(det.size(), std::size_t{1});
+    CHECK_EQ(det[0].bin, std::size_t{30});
+    CHECK_NEAR(det[0].freq, 3000.0, 1e-3);  // 6400 Hz / 64 bin = 100 Hz/bin
+    CHECK_NEAR(det[0].threshold_db, -89.05, 0.05);  // -100 + 10log10(12.4525)
+    CHECK_NEAR(det[0].snr_db, 90.0, 0.05);
+}
+
+MYTEST_CASE(dsp_cfar_invalid_options) {
+    my::dsp::Spectrum s = flat_spectrum(64, -100.0f);
+    s.db[30]            = -10.0f;
+
+    my::dsp::CfarOptions opt;
+
+    opt.train_cells = 0;
+    CHECK(my::dsp::ca_cfar(s, opt).empty());
+    CHECK(my::dsp::os_cfar(s, opt).empty());
+
+    opt = {};
+    opt.pfa = 0.0;
+    CHECK(my::dsp::ca_cfar(s, opt).empty());
+    CHECK(my::dsp::os_cfar(s, opt).empty());
+
+    opt = {};
+    opt.pfa = 1.0;
+    CHECK(my::dsp::ca_cfar(s, opt).empty());
+    CHECK(my::dsp::os_cfar(s, opt).empty());
+
+    opt = {};
+    opt.guard_cells = 1000000;
+    CHECK(my::dsp::ca_cfar(s, opt).empty());
+    CHECK(my::dsp::os_cfar(s, opt).empty());
+
+    opt = {};
+    opt.train_cells = 64;  // 参考窗比整条谱还长
+    CHECK(my::dsp::ca_cfar(s, opt).empty());
+    CHECK(my::dsp::os_cfar(s, opt).empty());
+
+    // 门限系数对非法参数同样不产生"看起来能用"的值
+    CHECK_EQ(my::dsp::cfar_ca_alpha(0, 1e-4), 0.0);
+    CHECK_EQ(my::dsp::cfar_ca_alpha(8, 0.0), 0.0);
+    CHECK_EQ(my::dsp::cfar_ca_alpha(8, 1.0), 0.0);
+    CHECK_EQ(my::dsp::cfar_ca_alpha(8, -0.1), 0.0);
+}
+
+MYTEST_CASE(dsp_cfar_min_snr_margin) {
+    // 尖峰 -80 dB，默认门限约 -89 dB（刚过 9 dB）；抬高 20 dB 余量后应当消失。
+    my::dsp::Spectrum s = flat_spectrum(64, -100.0f);
+    s.db[32]            = -80.0f;
+
+    const auto base = my::dsp::ca_cfar(s);
+    CHECK_EQ(base.size(), std::size_t{1});
+    CHECK_EQ(base[0].bin, std::size_t{32});
+    CHECK_NEAR(base[0].threshold_db, -89.05, 0.05);
+    CHECK_NEAR(base[0].snr_db, 20.0, 0.05);
+
+    my::dsp::CfarOptions opt;
+    opt.min_snr_db = 5.0f;  // 门限抬到约 -84 dB，仍低于 -80 dB
+    const auto with5 = my::dsp::ca_cfar(s, opt);
+    CHECK_EQ(with5.size(), std::size_t{1});
+    CHECK_NEAR(with5[0].threshold_db, -84.05, 0.05);
+
+    opt.min_snr_db = 20.0f;  // 门限抬到约 -69 dB，峰被挡掉
+    CHECK(my::dsp::ca_cfar(s, opt).empty());
+    CHECK(my::dsp::os_cfar(s, opt).empty());
+}
+
 // -----------------------------------------------------------------------------
 //  滤波
 // -----------------------------------------------------------------------------
