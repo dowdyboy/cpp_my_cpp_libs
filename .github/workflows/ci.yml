@@ -235,7 +235,7 @@ jobs:
         run: |
           cmake -S . -B build/ci-${{ matrix.target }} -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE=${{ matrix.toolchain }}
+            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/${{ matrix.toolchain }}
       - name: Build
         run: cmake --build build/ci-${{ matrix.target }}
       - name: 校验产物架构
@@ -472,7 +472,7 @@ jobs:
         run: |
           cmake -S . -B build/qemu-${{ matrix.target }} -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE=${{ matrix.toolchain }} \
+            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/${{ matrix.toolchain }} \
             -DMYLIB_BUILD_EXAMPLES=OFF \
             -DMYLIB_BUILD_TOOLS=OFF \
             -DMYLIB_ENABLE_ONNXRUNTIME=OFF \
@@ -593,7 +593,7 @@ jobs:
         run: |
           cmake -S . -B build/pkg -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE=${{ matrix.toolchain }} \
+            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/${{ matrix.toolchain }} \
             -DMYLIB_BUILD_EXAMPLES=OFF \
             -DMYLIB_BUILD_TESTS=OFF \
             -DMYLIB_BUILD_TOOLS=OFF \
@@ -614,7 +614,7 @@ jobs:
           test -f "${prefix}share/licenses/my_cpp_libs/THIRD_PARTY_NOTICES.md"
           grep -q "cxx_std_17" "${prefix}lib/cmake/my_cpp_libs/my_cpp_libsConfig.cmake"
           cmake -S tests/sdk_consumer -B build/consumer -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE=${{ matrix.toolchain }} \
+            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/${{ matrix.toolchain }} \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$prefix"
           cmake --build build/consumer
