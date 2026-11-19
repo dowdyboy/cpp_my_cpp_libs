@@ -533,10 +533,14 @@ jobs:
           - target: armv7
             packages: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
             triple: arm-linux-gnueabihf
+            arch: armhf
+            cc: arm-linux-gnueabihf-gcc
             toolchain: cmake/toolchains/linux-armv7-cross.cmake
           - target: aarch64
             packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
             triple: aarch64-linux-gnu
+            arch: arm64
+            cc: aarch64-linux-gnu-gcc
             toolchain: cmake/toolchains/linux-aarch64-cross.cmake
     steps:
       - uses: actions/checkout@v4
@@ -552,12 +556,39 @@ jobs:
           key: deps-linux-${{ hashFiles('scripts/fetch-deps.sh', 'scripts/fetch-deps.ps1', 'resources/README.md') }}
           restore-keys: deps-linux-
       - run: bash scripts/fetch-deps.sh
-      - name: 从 sysroot 里读出 glibc 版本做包名后缀
+      # 包名里的 glibc 版本**不能猜**：猜错了就是把 2.39 的包装到 2.30 的板子上。
+      # 这里按可信度从高到低探测，全都探不到就直接失败，不生成"名字不确定"的包。
+      - name: 探测交叉 sysroot 的 glibc 版本（探测不到就失败）
         run: |
           set -euo pipefail
-          v=$(ls /usr/${{ matrix.triple }}/lib/libc-*.so | head -1 | grep -oE '[0-9]+\.[0-9]+$' | tr -d '.')
-          echo "包名后缀: linux-${{ matrix.target }}-glibc${v}-basic"
-          echo "SUFFIX=linux-${{ matrix.target }}-glibc${v}-basic" >> "$GITHUB_ENV"
+          v=""
+          # 1) 让编译器告诉我们它要链接的 libc 在哪，再读文件名里的版本（最可信）。
+          #    注意：解出来的名字可能只是 libc.so.6（没有版本号），那就当没探到，
+          #    绝不能把 "6" 当成 glibc 6。
+          f=$(${{ matrix.cc }} -print-file-name=libc.so.6 || true)
+          if [ -n "$f" ] && [ -e "$f" ]; then
+            b=$(basename "$(readlink -f "$f")")
+            case "$b" in
+              libc-[0-9]*) v=$(echo "$b" | sed -E 's/^libc-([0-9]+\.[0-9]+).*/\1/') ;;
+              *)           v="" ;;
+            esac
+          fi
+          # 2) 退回 dpkg 里 libc6-<arch>-cross 的版本
+          if [ -z "$v" ]; then
+            v=$(dpkg-query -W -f='${Version}' "libc6-${{ matrix.arch }}-cross" 2>/dev/null \
+                | grep -oE '^[0-9]+\.[0-9]+' || true)
+          fi
+          # 3) 最后退回宿主 glibc（Ubuntu 上交叉 libc 与宿主同版本）
+          if [ -z "$v" ]; then
+            v=$(ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$' || true)
+          fi
+          if [ -z "$v" ]; then
+            echo "::error::推不出交叉 sysroot 的 glibc 版本，拒绝生成名字不确定的包"
+            exit 1
+          fi
+          suffix="linux-${{ matrix.target }}-glibc$(echo "$v" | tr -d '.')-basic"
+          echo "包名后缀: $suffix（探测到的 glibc = $v）"
+          echo "SUFFIX=$suffix" >> "$GITHUB_ENV"
       - name: Configure（打包配置）
         run: |
           cmake -S . -B build/pkg -G Ninja \
