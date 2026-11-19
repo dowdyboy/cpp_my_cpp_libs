@@ -45,7 +45,7 @@ int main() {
     my::log::Config cfg;
     cfg.level      = my::log::Level::Info;
     cfg.to_console = true;
-    my::log::init(cfg);
+    (void)my::log::init(cfg);
 
     // -------------------------------------------------------------------------
     // 1. 合成一段 3 秒的"采集"：CW / AM / FM / FSK 四个突发，各自频率不同

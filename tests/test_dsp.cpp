@@ -266,12 +266,14 @@ MYTEST_CASE(dsp_find_peaks) {
     CHECK(has700);
 }
 
-// find_peaks 的契约：局部极大、高于 noise_floor + min_prominence、
-// **结果按频率升序**、max_peaks 截断。
+// find_peaks 的契约（0.1.4 起）：
+//   * 局部极大；
+//   * 高于 noise_floor + min_prominence（粗筛）；
+//   * **真·prominence >= min_prominence**（标准定义，见 dsp.hpp）；
+//   * 输出按频率升序；max_peaks 截断保留最强的。
 //
-// 注意"单音 + 平坦噪声底"下，噪声底附近的 bin 也可能满足"局部极大且高出 6 dB"，
-// 于是会返回若干假峰 —— 这是已知的设计取舍，所以这里**不**断言"只有 1 个峰"，
-// 只要求真峰存在且所有返回值是有限数。
+// 这条用例是"定语义"的直接证据：单音谱必须只返回**一个**峰。
+// 旧实现在这里会返回 8 个（7 个是噪声起伏，peaks.front() 甚至是 320 Hz）。
 MYTEST_CASE(dsp_find_peaks_tone_contract) {
     const double fs = 8000.0;
     const double f0 = 1000.0;
@@ -285,29 +287,133 @@ MYTEST_CASE(dsp_find_peaks_tone_contract) {
     CHECK_NEAR(s.peak_db, 0.0, 0.5);  // 满幅单音 = 0 dBFS
 
     const auto peaks = my::dsp::find_peaks(s);  // 默认 min_prominence_db = 6
-    CHECK(!peaks.empty());
-    CHECK(peaks.size() <= 8);  // max_peaks 默认 8
-
-    // 升序（实现最后按 freq 排序，不是按幅度）
-    for (std::size_t i = 1; i < peaks.size(); ++i) {
-        CHECK(peaks[i - 1].freq <= peaks[i].freq);
-    }
-
-    bool has_f0 = false;
-    for (const auto& p : peaks) {
-        CHECK(p.bin < s.db.size());
-        EXPECT(std::isfinite(p.freq));
-        EXPECT(std::isfinite(static_cast<double>(p.db)));
-        // 峰必须高于噪声底 + 最小突出度
-        EXPECT(p.db >= s.noise_floor_db + 6.0f - 1e-3f);
-        // Peak 的 bin/freq/db 必须和频谱一致
-        EXPECT_NEAR(s.freq_hz[p.bin], p.freq, 1e-9);
-        EXPECT(s.db[p.bin] == p.db);
-        if (std::fabs(p.freq - f0) <= 2.0) has_f0 = true;
-    }
-    CHECK(has_f0);
+    CHECK_EQ(peaks.size(), std::size_t{1});     // 干净单音只该有一个峰
+    CHECK_EQ(peaks[0].bin, s.peak_bin);
+    CHECK_NEAR(peaks[0].freq, 1000.0, 1.0);
+    CHECK_NEAR(peaks[0].db, 0.0, 0.5);
+    // 单音两侧都没有更高的 bin，所以 prominence = 峰顶 - 整段最低谷底。
+    // 注意 noise_floor_db 是**中位数**，一般高于最低谷底，所以这里是 >= 而不是 ==。
+    CHECK(peaks[0].prominence_db > 100.0f);
+    CHECK(peaks[0].prominence_db >= s.peak_db - s.noise_floor_db);
 }
 
+MYTEST_CASE(dsp_find_peaks_two_tones) {
+    const double fs = 8000.0;
+    Samples      x(4096);
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        const double tt = static_cast<double>(i) / fs;
+        x[i] = static_cast<float>(std::sin(2.0 * kPi * 1000.0 * tt) +
+                                  0.3 * std::sin(2.0 * kPi * 2500.0 * tt));
+    }
+
+    CHECK_OK_VALUE(s, my::dsp::welch(x, fs, 1024, 0.5f));
+    const auto peaks = my::dsp::find_peaks(s);
+    CHECK_EQ(peaks.size(), std::size_t{2});
+    // 调幅差 0.3 ≈ -10.5 dB，两峰都该显著高于噪声底
+    CHECK_NEAR(peaks[0].freq, 1000.0, 8.0);
+    CHECK_NEAR(peaks[1].freq, 2500.0, 8.0);
+    CHECK(peaks[0].freq < peaks[1].freq);        // 频率升序
+    CHECK(peaks[0].db > peaks[1].db);            // 但 1 kHz 更强
+    CHECK(peaks[1].prominence_db > 40.0f);
+}
+
+MYTEST_CASE(dsp_find_peaks_noise_only) {
+    // 纯噪声：没有真·prominence 超过 6 dB 的起伏，应当一个峰都不返回。
+    // （旧实现会返回 max_peaks 个噪声 bin —— 这就是这次改语义要解决的问题。）
+    const double fs = 8000.0;
+    Samples      x(4096);
+    std::mt19937 rng(2024);
+    std::normal_distribution<float> dist(0.0f, 0.05f);
+    for (auto& v : x) v = dist(rng);
+
+    CHECK_OK_VALUE(s, my::dsp::welch(x, fs, 1024, 0.5f));
+    const auto peaks = my::dsp::find_peaks(s, 6.0f);
+    CHECK(peaks.empty());
+    // 放宽门限到 2 dB 之后才会开始有大把噪声峰 —— 说明门限是真在起作用
+    const auto loose = my::dsp::find_peaks(s, 2.0f);
+    CHECK(loose.size() > peaks.size());
+}
+
+MYTEST_CASE(dsp_find_peaks_max_keeps_strongest) {
+    // 四个音，幅度 1.0 / 0.5 / 0.25 / 0.125：max_peaks=2 时必须保留**最强的两个**
+    // （1 kHz 与 1.5 kHz），而不是频率最低的那两个。
+    const double fs = 8000.0;
+    Samples      x(4096);
+    const double freqs[4] = {700.0, 1000.0, 1500.0, 2700.0};
+    const double amps[4]  = {0.125, 1.0, 0.5, 0.25};
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        const double tt = static_cast<double>(i) / fs;
+        double       v  = 0.0;
+        for (int k = 0; k < 4; ++k) v += amps[k] * std::sin(2.0 * kPi * freqs[k] * tt);
+        x[i] = static_cast<float>(v);
+    }
+
+    CHECK_OK_VALUE(s, my::dsp::welch(x, fs, 1024, 0.5f));
+    const auto peaks = my::dsp::find_peaks(s, 6.0f, 0.0, 2);
+    CHECK_EQ(peaks.size(), std::size_t{2});
+    CHECK_NEAR(peaks[0].freq, 1000.0, 8.0);
+    CHECK_NEAR(peaks[1].freq, 1500.0, 8.0);
+}
+
+MYTEST_CASE(dsp_find_peaks_min_sep_merges) {
+    // 两个相隔 8 Hz 的音 + min_sep=50 Hz：只能留下更强的那一个。
+    const double fs = 4000.0;
+    // 32768 点 = 16 段 Welch 平均（nfft=4096、50% 重叠）：真实系统的谱都是平均过的，
+    // 平均段数少的时候单个噪声 bin 也能比中位数高 6 dB（见下面 noise_gate 那条用例）。
+    Samples      x(32768);
+    const double f1 = 500.0, f2 = 508.0;
+    std::mt19937 rng(7);
+    std::normal_distribution<float> noise(0.0f, 1e-3f);  // -60 dB 底噪，贴近真实采集
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        const double tt = static_cast<double>(i) / fs;
+        x[i] = static_cast<float>(std::sin(2.0 * kPi * f1 * tt) +
+                                  0.6 * std::sin(2.0 * kPi * f2 * tt)) +
+               noise(rng);
+    }
+
+    CHECK_OK_VALUE(s, my::dsp::welch(x, fs, 4096, 0.5f));
+
+    const auto merged = my::dsp::find_peaks(s, 6.0f, 50.0, 8);
+
+    CHECK_EQ(merged.size(), std::size_t{1});
+    CHECK_NEAR(merged[0].freq, 500.0, 10.0);  // 更强的是 500 Hz
+
+    const auto both = my::dsp::find_peaks(s, 6.0f, 0.0, 8);
+    CHECK(both.size() >= 2);  // 不限间隔时两个都在
+}
+// find_peaks 的**已知限制**（用测试钉住，防止有人"顺手修"错）：
+// min_prominence_db 是"相对噪声底"的门限，而 Welch 平均段数很少时，单个噪声 bin
+// 本来就能比中位数高 6 dB 以上 —— 这时 6 dB 的默认门限会放进几个噪声峰。
+// 这不是 bug，是判据本身的性质：要更干净就调高门限（或按 Peak::db 再过滤）。
+// 真正抗噪的检测器需要 CFAR（docs/08 §8 的待办项）。
+MYTEST_CASE(dsp_find_peaks_noise_gate_limitation) {
+    const double fs = 4000.0;
+    Samples      x(8192);   // nfft=4096 -> 只有 3 段平均，噪声方差大
+    std::mt19937 rng(11);
+    std::normal_distribution<float> noise(0.0f, 1e-3f);
+    for (auto& v : x) v = noise(rng);
+
+    CHECK_OK_VALUE(s, my::dsp::welch(x, fs, 4096, 0.5f));
+
+    // 默认 6 dB：会放进若干噪声峰（这是这个门限的性质，见用例标题）
+    const auto loose = my::dsp::find_peaks(s, 6.0f);
+    CHECK(!loose.empty());
+
+    // 12 dB：噪声峰被挡住，返回空
+    const auto strict = my::dsp::find_peaks(s, 12.0f);
+    CHECK(strict.empty());
+
+    // 但 12 dB 不会把真正的音挡掉：加一个 -30 dB 的音，strict 门限仍能找到它
+    Samples y(8192);
+    for (std::size_t i = 0; i < y.size(); ++i) {
+        const double tt = static_cast<double>(i) / fs;
+        y[i] = static_cast<float>(0.03 * std::sin(2.0 * kPi * 700.0 * tt)) + noise(rng);
+    }
+    CHECK_OK_VALUE(s2, my::dsp::welch(y, fs, 4096, 0.5f));
+    const auto with_tone = my::dsp::find_peaks(s2, 12.0f);
+    CHECK_EQ(with_tone.size(), std::size_t{1});
+    CHECK_NEAR(with_tone[0].freq, 700.0, 10.0);
+}
 // -----------------------------------------------------------------------------
 //  滤波
 // -----------------------------------------------------------------------------

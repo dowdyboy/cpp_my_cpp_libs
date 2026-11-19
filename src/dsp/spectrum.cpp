@@ -148,37 +148,82 @@ Result<Spectrum> welch(const Samples& x, double sample_rate, std::size_t nfft, f
     return s;
 }
 
+namespace {
+
+/// 真·prominence（dB）：峰顶相对"两侧最近的更高点之间、较浅那个谷底"的落差。
+///
+/// 这是地形学与光谱学共用的标准定义：prominence = h[k] - max(left_valley, right_valley)，
+/// 其中 left_valley / right_valley 分别是"从峰顶往左/右走，直到遇到比它更高的 bin（或边界）
+/// 这一路上的最小值"。
+///
+/// 为什么必须用真·prominence 而不是"高出噪声底多少"：
+/// 单音 + 平坦噪声底的谱里，噪声 bin 的起伏幅度虽然只有 1~2 dB，但它们**整体**都远高于
+/// 噪声底的估计值（median），于是"高出噪声底 6 dB"这类绝对门限会把几十个噪声 bin 判成峰。
+/// 真·prominence 只看峰与它自己两侧谷底的落差，噪声起伏天然过不了 6 dB。
+///
+/// 代价与"到最近更高 bin 的距离"成正比；频谱通常只有几百到几千 bin，候选又少，
+/// 实测可以忽略（见 docs/08 §9）。
+float prominence_db(const std::vector<float>& db, std::size_t k) {
+    const float top = db[k];
+
+    float left_valley = top;
+    for (std::size_t i = k; i-- > 0;) {
+        if (db[i] > top) break;
+        if (db[i] < left_valley) left_valley = db[i];
+    }
+
+    float right_valley = top;
+    for (std::size_t i = k + 1; i < db.size(); ++i) {
+        if (db[i] > top) break;
+        if (db[i] < right_valley) right_valley = db[i];
+    }
+
+    const float valley = left_valley > right_valley ? left_valley : right_valley;
+    return top - valley;
+}
+
+}  // namespace
+
 std::vector<Peak> find_peaks(const Spectrum& s, float min_prominence_db, double min_sep_hz,
                              std::size_t max_peaks) {
     std::vector<Peak> out;
-    if (s.db.size() < 3 || max_peaks == 0) return out;
+    if (s.db.size() < 3 || max_peaks == 0 || s.db.size() != s.freq_hz.size()) return out;
 
+    // 前置粗筛：噪声底附近整段跳过。它便宜，而且能挡住"整段谱都贴在噪声底"的情况；
+    // 真正的判据是下面的真·prominence。两者都叫 min_prominence_db，语义是 AND。
     const float floor_db = s.noise_floor_db + min_prominence_db;
 
     struct Cand {
         std::size_t bin;
         float       db;
+        float       prom;
     };
     std::vector<Cand> cands;
     for (std::size_t k = 1; k + 1 < s.db.size(); ++k) {
-        if (s.db[k] >= floor_db && s.db[k] > s.db[k - 1] && s.db[k] >= s.db[k + 1]) {
-            cands.push_back({k, s.db[k]});
-        }
+        if (s.db[k] < floor_db) continue;
+        if (!(s.db[k] > s.db[k - 1] && s.db[k] >= s.db[k + 1])) continue;  // 局部极大
+        const float prom = prominence_db(s.db, k);
+        if (prom < min_prominence_db) continue;  // 真·prominence 门限
+        cands.push_back({k, s.db[k], prom});
     }
+
+    // 先按强度排序：max_peaks 截断要保留**最强的**几个，而不是恰好落在低频的那几个。
     std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.db > b.db; });
 
     for (const auto& c : cands) {
         if (out.size() >= max_peaks) break;
         bool too_close = false;
         for (const auto& p : out) {
-            if (std::fabs(static_cast<double>(s.freq_hz[c.bin]) - p.freq) < min_sep_hz) {
+            if (std::fabs(s.freq_hz[c.bin] - p.freq) < min_sep_hz) {
                 too_close = true;
                 break;
             }
         }
-        if (!too_close) out.push_back(Peak{c.bin, s.freq_hz[c.bin], c.db});
+        if (!too_close) out.push_back(Peak{c.bin, s.freq_hz[c.bin], c.db, c.prom});
     }
 
+    // 输出统一按频率升序（与 scipy.signal.find_peaks 的"按 index 升序"一致）。
+    // 想要"最强的峰"请用 Spectrum::peak_freq / peak_db，或自己对 Peak::db 排序。
     std::sort(out.begin(), out.end(), [](const Peak& a, const Peak& b) { return a.freq < b.freq; });
     return out;
 }

@@ -75,12 +75,33 @@ struct Spectrum {
 MYLIB_API Result<Spectrum> welch(const Samples& x, double sample_rate, std::size_t nfft,
                                  float overlap = 0.5f, Window window = Window::Hann);
 
-/// 在频谱上找峰：局部极大 + 高于噪声底 min_prominence_db + 与已选峰间隔 >= min_sep_hz。
+/// 一个谱峰。
 struct Peak {
     std::size_t bin  = 0;
-    double      freq = 0.0;
-    float       db   = 0.0f;
+    double      freq = 0.0;   ///< Hz
+    float       db   = 0.0f;  ///< dBFS（该 bin 的幅度）
+    /// **真·prominence**（dB）：峰顶相对"两侧最近的更高点之间、较浅那个谷底"的落差。
+    /// 这是地形学/光谱学的标准定义，也是 min_prominence_db 判据用的量。
+    float prominence_db = 0.0f;
 };
+
+/// 在频谱上找峰。
+///
+/// 判据（三个条件同时满足）：
+///   1. 局部极大（左邻更小、右邻不大于它）；
+///   2. 高于噪声底 `min_prominence_db`：`db[k] >= noise_floor_db + min_prominence_db`
+///      （便宜的粗筛，挡住"整段贴在噪声底"的情况）；
+///   3. **真·prominence** `>= min_prominence_db`：峰顶相对两侧谷底（各自到"最近的更高 bin"
+///      为止）中较浅那个的落差。
+///
+/// 为什么第 3 条必不可少：只有第 2 条时，"单音 + 平坦噪声底"的谱会把几十个噪声起伏
+/// 判成峰（它们的幅度整体都在噪声底估计值之上），`peaks.front()` 甚至不是真峰。
+/// 真·prominence 只看峰与自身两侧谷底的关系，噪声起伏（1~2 dB）天然过不了 6 dB。
+/// 0.1.4 起以此为准，见 docs/08 §9。
+///
+/// 输出顺序：**按频率升序**（与 scipy.signal.find_peaks 按 index 升序一致）。
+/// 想要"最强的那个峰"，用 `Spectrum::peak_bin/peak_freq/peak_db`；
+/// `max_peaks` 截断保留的是**最强的**几个，不是频率最低的几个。
 MYLIB_API std::vector<Peak> find_peaks(const Spectrum& s, float min_prominence_db = 6.0f,
                                        double min_sep_hz = 0.0, std::size_t max_peaks = 8);
 
