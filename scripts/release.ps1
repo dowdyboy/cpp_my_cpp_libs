@@ -102,13 +102,32 @@ if (-not $SkipPush) {
         $pushOk = $true
     } else {
         # 远端已有这个 tag 就跳过（幂等：重复跑不会报错）
-        $remote = git -c http.sslBackend=openssl ls-remote $gitUrl "refs/tags/$Tag" 2>&1
+        $remote = git -c http.sslBackend=openssl -c http.proxy= -c https.proxy= ls-remote $gitUrl "refs/tags/$Tag" 2>&1
         if ($remote -match [regex]::Escape("refs/tags/$Tag")) {
             Info "远端已有 $Tag，跳过推送"
             $pushOk = $true
         } else {
-            $out = & git -c credential.helper= -c http.sslBackend=openssl push $gitUrl "refs/heads/main:refs/heads/main" "refs/tags/$Tag" 2>&1
-            $gitExit = $LASTEXITCODE
+            # 本机走 127.0.0.1:7897 代理，偶发 "TLS connect error: unexpected eof"（实测两次），
+            # 重试即可；除网络抖动外不做任何静默吞错。
+            # 本机的 http.proxy=127.0.0.1:7897 时好时坏：走它经常 "TLS connect error: unexpected eof"，
+            # 直连反而稳定。这里两种走法都试，失败才重试并换下一种。
+            $variants = @(
+                @('-c', 'http.proxy=', '-c', 'https.proxy='),   # 直连优先
+                @()                                              # 退回系统代理配置
+            )
+            $gitExit = 1
+            foreach ($v in $variants) {
+                for ($attempt = 1; $attempt -le 3; $attempt++) {
+                    $args = @('-c', 'credential.helper=', '-c', 'http.sslBackend=openssl') + $v +
+                            @('push', $gitUrl, 'refs/heads/main:refs/heads/main', "refs/tags/$Tag")
+                    $out = & git @args 2>&1
+                    $gitExit = $LASTEXITCODE
+                    if ($gitExit -eq 0) { break }
+                    Write-Host "  push 失败（exit=$gitExit，模式=$($v -join ' ')），重试…" -ForegroundColor Yellow
+                    Start-Sleep -Seconds 3
+                }
+                if ($gitExit -eq 0) { break }
+            }
             $out = $out | ForEach-Object { $_ -replace [regex]::Escape($token), '***' }
             $out | ForEach-Object { Info $_ }
             if ($gitExit -eq 0) {
