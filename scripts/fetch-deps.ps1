@@ -121,3 +121,7 @@ Fetch-HeaderZip 'pocketfft-4d865cb.zip' '4d865cba24359b05b37da4e75aee24498c3b78e
 
 Write-Host ""
 Write-Host "完成。解压目录: $root\third_party（首次 cmake configure 时自动生成）"
+# 显式 exit 0：脚本里最后一条原生命令（curl）失败时，powershell -File 会把它的退出码
+# 当成整个脚本的退出码带出去 —— 那会让"已捕获的失败"仍然把 CI 判红。
+# 真正的致命错误走 throw，会在此之前就非零退出。
+exit 0
