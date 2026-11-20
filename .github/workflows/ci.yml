@@ -159,7 +159,7 @@ jobs:
   #   2) 编译器命令行里真的出现了 -fno-exceptions；
   #   3) 和 json 同开时**必须** configure 失败（fail-closed，不允许静默降级）。
   linux-noexceptions:
-    name: Linux / -fno-exceptions（core+math+dsp+net+io+time）
+    name: Linux / -fno-exceptions（core+math+dsp+net+io+time+serial）
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -172,10 +172,10 @@ jobs:
           key: deps-linux-${{ hashFiles('scripts/fetch-deps.sh', 'scripts/fetch-deps.ps1', 'resources/README.md') }}
           restore-keys: deps-linux-
       - run: bash scripts/fetch-deps.sh
-      # 子集是 core + math + dsp + net + io + time（0.1.2 起 io/time 也能无异常编译）。
+      # 子集是 core + math + dsp + net + io + time + serial（0.1.6 起 serial 也在里面）。
       # THREAD 必须关：std::thread 构造失败只能靠 std::system_error 上报，
       # 0.1.2 起它已经进了 fail-closed 名单，漏了这行 configure 会直接 FATAL_ERROR。
-      - name: Configure（只留 core + math + dsp + net + io + time）
+      - name: Configure（只留 core + math + dsp + net + io + time + serial）
         run: |
           cmake -S . -B build/ci-noex -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
