@@ -1,5 +1,57 @@
 # 变更记录
 
+## 0.1.9（2026-11-20）—— 补齐 0.1.8 留下的测试空洞
+
+0.1.8 的审计列了七类"没测到"的东西，这一版把它们填上：**用例 300 → 315**，
+CI job 14 → 15。
+
+### 1. 两个"有 CI 但没测"的组件接进了 CI
+
+| 缺口 | 原因 | 现在 |
+|---|---|---|
+| `cv` 的 8 条用例 | 没有任何 job 打开 CV（CI 拿不到 OpenCV 的 Windows 预编译包） | 新增 `linux-cv` job：apt 装 OpenCV 4.6（`src/cv` 只用 imread/imwrite/cvtColor/resize/Mat/Rect/Size 这些几十年没变的 API），跑整套 + 单独跑 `--suite=cv` |
+| `ml` 的 9 条用例 | `fetch-deps` 默认不下 ORT → 后端退化成 stub → 全部 `MYTEST_SKIP` | `windows-msvc` job 改成 `fetch-deps.ps1 -WithOrtWin`；有后端后 `--fail-on-skip` 也生效（ml 不许再静默跳过） |
+
+### 2. HTTP：PUT / DELETE / 静态挂载 / 413（3 条新用例）
+
+以前客户端只实际发过 GET/POST，服务端的 `put/del/options/set_mount_point`
+和 `max_payload_bytes` 一条都没测过：
+- `http_put_and_delete_routes`：PUT 的 body 真的到 handler、DELETE 真的清了状态；
+- `http_mount_point_serves_static_file`：`/static/hello.txt` 能取到内容；
+- `http_payload_over_limit_returns_413`：4 KB body 撞 1 KB 门限 → 413，
+  且**业务 handler 一次都不能被调用**（这是超限保护的关键）。
+
+### 3. image：save 只测过 PNG（3 条新用例）
+
+- `gap_image_save_load_roundtrip_jpeg`：quality=10 的文件必须比 quality=95 明显小
+  （证明 `quality` 真的传下去了），回读校验尺寸与通道；
+- `gap_image_save_load_roundtrip_bmp_tga`：这两种**无损**，逐像素比对；
+- `gap_image_prepare_file_matches_prepare`：`prepare_file` 与 `prepare` 产出的张量必须逐元素一致；
+- `gap_image_unletterbox_boxes_multiple`：多框批量映射（以前只测过 1 个框，stride 算错抓不到）。
+
+### 4. 零覆盖的公开 API（6 条新用例）
+
+`time::sleep_s`、`json::type_name`（8 种类型全覆盖）、`math::median_inplace`
+（奇数/偶数/单元素/空/负数）、`io::copy_file(overwrite=false)`（**不能覆盖已有目标**）、
+`io::TempFile::append/reset`（reset 要真的删文件）、`net::UdpSocket::leave_multicast`。
+
+### 5. thread：两条"名字与内容不符"的用例改写
+
+- `thread_pool_runs_concurrently` 只断言"200 个任务都跑了" —— 1 个 worker 串行执行也绿。
+  新增 `gap_thread_pool_actually_runs_in_parallel`：用**栅栏**观测并发度，
+  4 个任务必须同时到齐才继续（串行执行会超时，断言会红）。
+- 新增 `gap_thread_pool_shutdown_discard_drops_pending`：`shutdown(drain=false)`
+  必须丢弃排队任务、只等正在跑的那个 —— 这个分支以前零覆盖。
+
+### 6. 验证
+
+| 配置 | 结果 |
+|---|---|
+| MinGW x64 Release | **317/317**（315 用例 + 2 守卫） |
+| `-fno-exceptions` 子集 | **162/162**（`gaps` 套件依赖 thread，子集里不编） |
+| Linux（WSL） | 315 用例全绿 |
+| 新增 CI | `linux-cv`（首次真跑 cv 的 8 条）+ MSVC 带 ORT（首次真跑 ml 的 9 条） |
+
 ## 0.1.8（2026-11-20）—— 第二轮巡检：修掉 SDK 链接缺陷与一整类 UTF-8 路径问题
 
 四个维度（代码 / 测试 / 文档 / 构建）并行审计，本轮修掉其中最要紧的部分。

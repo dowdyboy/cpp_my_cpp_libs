@@ -11,6 +11,9 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -542,4 +545,100 @@ MYTEST_CASE(http_uninitialized_route_reports_error) {
     auto listen = server.listen_async();
     CHECK(!listen);
     CHECK_EQ(listen.code(), my::Errc::NotInitialized);
+}
+
+// -----------------------------------------------------------------------------
+//  0.1.9 补齐：PUT / DELETE 路由、静态目录挂载、请求体超限
+//  （以前这几条路径一条都没测过）
+// -----------------------------------------------------------------------------
+MYTEST_CASE(http_put_and_delete_routes) {
+    auto ts = TestServer::make();
+    CHECK_RESULT(ts);
+
+    std::string stored;
+    ts.value().server.put("/item", [&stored](const my::http::Request& req, my::http::Response& res) {
+        stored = req.body;
+        res.set_content("put-ok");
+    });
+    ts.value().server.del("/item", [&stored](const my::http::Request&, my::http::Response& res) {
+        stored.clear();
+        res.set_content("del-ok");
+    });
+    CHECK_OK(ts.value().server.listen_async());
+
+    auto cli = my::http::Client::create(client_opts(ts.value().base_url()));
+    CHECK_RESULT(cli);
+
+    auto put = cli.value().put("/item", "payload-123");
+    CHECK_RESULT(put);
+    CHECK_EQ(put.value().status, 200);
+    CHECK_EQ(put.value().body, std::string("put-ok"));
+    CHECK_EQ(stored, std::string("payload-123"));   // 服务端真的收到了 body
+
+    auto del = cli.value().del("/item");
+    CHECK_RESULT(del);
+    CHECK_EQ(del.value().status, 200);
+    CHECK_EQ(del.value().body, std::string("del-ok"));
+    CHECK(stored.empty());                          // handler 真的被执行了
+
+    ts.value().server.stop();
+}
+
+MYTEST_CASE(http_mount_point_serves_static_file) {
+    const std::string dir =
+#if defined(_WIN32)
+        std::string(std::getenv("TEMP") ? std::getenv("TEMP") : ".") + "\\mylib_http_static";
+#else
+        std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp") + "/mylib_http_static";
+#endif
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    {
+        std::ofstream f(std::filesystem::path(dir) / "hello.txt", std::ios::binary);
+        f << "static-file-content";
+    }
+
+    auto ts = TestServer::make();
+    CHECK_RESULT(ts);
+    CHECK_OK(ts.value().server.set_mount_point("/static", dir));
+    CHECK_OK(ts.value().server.listen_async());
+
+    auto cli = my::http::Client::create(client_opts(ts.value().base_url()));
+    CHECK_RESULT(cli);
+    auto res = cli.value().get("/static/hello.txt");
+    CHECK_RESULT(res);
+    CHECK_EQ(res.value().status, 200);
+    CHECK_EQ(res.value().body, std::string("static-file-content"));
+
+    ts.value().server.stop();
+    std::filesystem::remove_all(dir, ec);
+}
+
+MYTEST_CASE(http_payload_over_limit_returns_413) {
+    my::http::ServerOptions opt;
+    opt.host              = "127.0.0.1";
+    opt.port              = 0;
+    opt.max_payload_bytes = 1024;   // 低门限，便于触发
+    auto srv              = my::http::Server::create(opt);
+    CHECK_RESULT(srv);
+
+    bool handler_ran = false;
+    srv.value().post("/big", [&handler_ran](const my::http::Request&, my::http::Response& res) {
+        handler_ran = true;
+        res.set_content("should-not-happen");
+    });
+    CHECK_OK(srv.value().listen_async());
+
+    auto cli = my::http::Client::create(
+        client_opts("http://127.0.0.1:" + std::to_string(srv.value().port())));
+    CHECK_RESULT(cli);
+    auto res = cli.value().post("/big", std::string(4096, 'x'));
+
+    // 客户端要么拿到 413，要么连接被服务端在读之前关掉（都算"拒绝了"）
+    if (res.ok()) {
+        CHECK_EQ(res.value().status, 413);
+    }
+    CHECK(!handler_ran);   // 关键：超限请求绝不能进业务 handler
+
+    srv.value().stop();
 }

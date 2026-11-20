@@ -260,9 +260,12 @@ jobs:
             third_party
           key: deps-windows-${{ hashFiles('scripts/fetch-deps.ps1') }}
           restore-keys: deps-windows-
-      - name: 补齐依赖压缩包
+      # -WithOrtWin：把 ONNX Runtime 也拉下来。没有它 infer 会退化成 stub，
+      # ml 的 9 条用例就会全部 MYTEST_SKIP —— 那等于"有 CI 但没测"。
+      # 拉下来之后 --fail-on-skip 也会生效（有后端时 ml 不许静默跳过）。
+      - name: 补齐依赖压缩包（含 Windows 的 ONNX Runtime）
         shell: pwsh
-        run: ./scripts/fetch-deps.ps1
+        run: ./scripts/fetch-deps.ps1 -WithOrtWin
       - name: Configure
         run: >
           cmake -S . -B build/ci -A x64
@@ -680,3 +683,48 @@ jobs:
           name: sdk-win-x64-ort
           path: dist/*.zip
           if-no-files-found: error
+  # ---------------------------------------------------------------- Linux / OpenCV（cv 组件）
+  # cv 组件的 8 条用例以前**没有任何 job 打开过** —— 因为 CI 拿不到 OpenCV 的 Windows 预编译包。
+  # 但 Linux 上 apt 就能装（Ubuntu 24.04 是 OpenCV 4.6），而 src/cv 只用了
+  # imread/imwrite/cvtColor/resize/Mat/Rect/Size 这些几十年没变的 API，4.6 完全够用。
+  # 于是"cv 只在有 OpenCV 的机器上验过"这件事，在 CI 上也有了记录。
+  linux-cv:
+    name: Linux / OpenCV（cv 组件）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 OpenCV + ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libopencv-dev
+      - uses: actions/cache@v4
+        with:
+          path: |
+            resources
+            third_party
+          key: deps-linux-${{ hashFiles('scripts/fetch-deps.sh', 'scripts/fetch-deps.ps1', 'resources/README.md') }}
+          restore-keys: deps-linux-
+      - run: bash scripts/fetch-deps.sh
+      - name: 找到 apt 的 OpenCVConfig.cmake
+        run: |
+          ocv=$(dpkg -L libopencv-dev | grep -m1 'OpenCVConfig.cmake$' | xargs dirname)
+          echo "OpenCV 配置目录: $ocv"
+          echo "MYLIB_OPENCV_ROOT=$ocv" >> "$GITHUB_ENV"
+      - name: Configure (cv=ON)
+        run: |
+          cmake -S . -B build/ci-cv -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMYLIB_BUILD_EXAMPLES=OFF \
+            -DMYLIB_ENABLE_CV=ON \
+            -DMYLIB_OPENCV_ROOT="$MYLIB_OPENCV_ROOT"
+      - name: 确认 cv 组件真的建出来了
+        run: test -f build/ci-cv/src/libmy_cpp_libs_cv.a
+      - name: Build
+        run: cmake --build build/ci-cv
+      - name: Test（含 cv 的 8 条）
+        run: ctest --test-dir build/ci-cv --output-on-failure
+      - name: 确认 cv 用例真的跑了（不是全 skip）
+        run: |
+          set -euo pipefail
+          ./build/ci-cv/bin/mylib_tests --suite=cv

@@ -71,6 +71,14 @@ if(TARGET mylib_preprocess)
     list(APPEND _test_links mylib_preprocess)
 endif()
 
+# 审计补齐的测试空洞：跨组件（time/json/math/io/net/thread/image），
+# 所以放在最后，按"这些 target 都存在"来门控。
+if(TARGET mylib_image AND TARGET mylib_net AND TARGET mylib_thread)
+    list(APPEND _test_sources test_gaps.cpp)
+    list(APPEND _test_suites gaps)
+    list(APPEND _test_links mylib_image mylib_net mylib_thread mylib_io mylib_json mylib_math mylib_time)
+endif()
+
 if(TARGET mylib_dsp)
     list(APPEND _test_sources test_dsp.cpp test_dsp_stream.cpp)
     list(APPEND _test_suites dsp dsp_stream)

@@ -15,7 +15,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(my_cpp_libs
-    VERSION 0.1.8
+    VERSION 0.1.9
     DESCRIPTION "Unified cross-platform C++ wrapper over third-party open-source libraries"
     LANGUAGES CXX)
 
