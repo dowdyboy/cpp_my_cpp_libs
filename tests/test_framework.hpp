@@ -337,4 +337,4 @@ inline int run_all() { return run(nullptr, nullptr); }
         ::mytest::fail(#expr " 应当返回结果", __FILE__, __LINE__);          \
         return;                                                              \
     }                                                                        \
-    const auto& name = MYTEST_DETAIL_CAT(_rv_, __LINE__).value()
+    auto& name = MYTEST_DETAIL_CAT(_rv_, __LINE__).value()

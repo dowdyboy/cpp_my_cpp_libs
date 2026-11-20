@@ -13,6 +13,7 @@
 #include <my_cpp_libs/json/json.hpp>
 #include <my_cpp_libs/log/log.hpp>
 #include <my_cpp_libs/net/net.hpp>
+#include <my_cpp_libs/serial/serial.hpp>
 #include <my_cpp_libs/thread/thread.hpp>
 #include <my_cpp_libs/time/time.hpp>
 
@@ -106,6 +107,24 @@ int main() {
         expect(pool.value()->wait_idle(std::chrono::milliseconds(5000)), "线程池任务完成");
         expect(hits.load() == 8, "线程池执行了全部任务");
         pool.value()->shutdown();
+    }
+
+    // serial：只验"头文件可用 + 参数校验/枚举能跑"，不碰真实串口（CI 上大概率没有）
+    {
+        my::serial::Config scfg;
+        scfg.baud = 115200;
+        expect(my::serial::validate(scfg).ok(), "serial 参数校验通过");
+
+        scfg.data_bits = 3;
+        expect(my::serial::validate(scfg).code() == my::Errc::InvalidArgument,
+               "serial 非法 data_bits 被拒绝");
+
+        auto ports = my::serial::list_ports();
+        expect(static_cast<bool>(ports), "serial 端口枚举成功");
+        std::printf("  serial: 发现 %zu 个串口\n", ports ? ports.value().size() : 0);
+
+        auto bad = my::serial::Port::open("/dev/definitely-not-a-port-xyz");
+        expect(!bad.ok(), "serial 打开不存在的设备返回错误");
     }
 
     if (failures != 0) {

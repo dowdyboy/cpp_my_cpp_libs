@@ -1,5 +1,77 @@
 # 变更记录
 
+## 0.1.6（2026-11-20）—— serial 串口组件
+
+第 16 个组件：Windows COM / Linux termios 的薄封装，无三方依赖。
+
+### 1. 为什么自己写
+
+平台差异只有几处（打开、配置、超时、可读字节数、清缓冲、枚举、独占），集中在
+`src/serial/serial.cpp` 里；引 Boost.Asio 换来的是用不到的异步/定时器，在 Zynq 上
+编译代价比整个库还大。
+
+### 2. API 与两条关键契约
+
+```cpp
+my::serial::Config cfg;  cfg.baud = 921600;  cfg.data_bits = 8;
+auto opened = my::serial::Port::open("/dev/ttyUSB0", cfg);
+std::uint8_t buf[256];
+auto n = opened.value().read_some(buf, sizeof buf, std::chrono::milliseconds(100));
+```
+
+1. **`read_some()` 超时返回 0 字节 + Ok，不是错误**。串口"暂时没数据"是常态，
+   轮询循环不该用错误码做控制流。（`my::net` 的 `recv` 超时返回 `Errc::Timeout`，
+   因为 TCP 超时通常意味着对端出问题 —— 两处头文件都写明了这个差异，别记混。）
+2. **`write_some()` 超时返回已写字节数 + Ok**；要"必须写完"用 `write_all()`（写不完报
+   `Errc::Timeout` 并在消息里带"已写 X/Y 字节"）。
+
+其余：`read_line`（命令式协议）、`bytes_available`、`flush`、`list_ports`（Windows 读注册表
+`SERIALCOMM`；Linux 扫 `/dev/tty*` + `/dev/serial/by-id/*`）、`native_handle()`（自己 poll）。
+
+波特率：Windows 任意值；Linux 只支持 termios 标准档位（50 ~ 4 Mbaud），
+给非标准值报 `InvalidArgument` 并列出支持范围 —— **不静默降级**。
+
+### 3. 怎么测的（没有串口硬件）
+
+| 层 | 用例数 | 平台 |
+|---|---|---|
+| 参数校验 / 枚举 / 移动语义 | 8 | 全平台 |
+| 真实收发（**PTY 对**：master 当对端设备，slave 交给 `Port::open`） | 9 | Linux（Windows 上 skip） |
+
+PTY 让 `read/write/poll/FIONREAD/tcflush` 走真实驱动路径而不是打桩。用例专盯两个
+最容易出错的地方：**超时边界**与**部分写**（例如用 64 KB 灌爆 PTY 缓冲，验证
+`write_all` 绝不永久阻塞）。CI 里这 9 条跑在 Linux 全组件 job 与两个 QEMU job（ARM 真跑）。
+
+### 4. 顺带修掉的三个问题
+
+1. **SDK 配置里的硬编码组件列表**：`find_package` 生成的 `my_cpp_libsConfig.cmake` 有两处
+   手写组件列表（`_mylib_sdk_add_component` 与 `my_cpp_libs::all` 的链接），加 serial 时
+   漏了 —— 结果"装完之后能 find_package、能编，链接时 serial 符号全 undefined"。
+   这是**消费方测试**抓出来的（正好是 0.1.3 那次评估里 C1 担心的漂移）。
+2. **`--fail-on-skip` 误伤**：该开关本意是"有 ORT 时 ml 不许静默跳过"，但 Windows MSVC job
+   开着它，而 serial 的 9 条 PTY 用例在 Windows 上必然跳过 → 会把合法环境跳过判成失败。
+   改成逐用例放行（`serial_*` 不带该开关）。
+3. **测试框架 `CHECK_OK_VALUE` 绑定成 `const auto&`**：move-only 的 `Result<Port>` 用不了，
+   且 const 引用让 `port.read_some()` 这类非 const 方法调用不了。改成 `auto&`。
+
+### 5. `-fno-exceptions`
+
+serial 只用系统调用 + `Status`，没有 try/catch，因此**进子集**：
+`core + math + dsp + net + io + time + serial`。子集用例 134 → **151**，本地 153/153 通过。
+
+### 6. 验证
+
+| 配置 | 结果 |
+|---|---|
+| MinGW x64 Release | **292/292**（290 用例 + 2 守卫），零告警 |
+| Linux（WSL）Release | **292/292**；serial 17/17（含 9 条 PTY 真收发） |
+| `-fno-exceptions` 子集 | **153/153**（含 serial 17） |
+| install → `find_package` → 消费方 | 通过（`serial: 发现 1 个串口`） |
+
+> 已知告警（非本次引入）：Linux + GCC 13 在 `Result<T>::map` 的 variant 实例化上报
+> `-Wmaybe-uninitialized` 误报（`test_core.cpp` 触发，MinGW/GCC 15 不报）。属 GCC 已知问题，
+> 未用 pragma 掩盖，留作后续。
+
 ## 0.1.5（2026-11-19）—— 发版闭环（CI 打包）+ CFAR 检测器
 
 两件事，对应上一轮评估里"按投入产出排"的前两项。

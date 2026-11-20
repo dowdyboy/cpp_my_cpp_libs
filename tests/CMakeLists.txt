@@ -45,6 +45,13 @@ if(TARGET mylib_thread)
     list(APPEND _test_suites thread)
     list(APPEND _test_links mylib_thread)
 endif()
+# serial 的自测分两层：参数校验/枚举在哪个平台都能跑；真正的收发放到 PTY 上，
+# 只在 POSIX 上跑（Windows 没有无名虚拟串口，那部分用例会 MYTEST_SKIP）。
+if(TARGET mylib_serial)
+    list(APPEND _test_sources test_serial.cpp)
+    list(APPEND _test_suites serial)
+    list(APPEND _test_links mylib_serial)
+endif()
 if(TARGET mylib_math)
     list(APPEND _test_sources test_math.cpp)
     list(APPEND _test_suites math)
@@ -144,22 +151,26 @@ if(_case_count EQUAL 0)
 endif()
 
 # 这个构建里如果有**真的**推理后端，ml 用例就不许 skip（skip 意味着 golden 对拍没跑）。
-# 没有后端时（MinGW 没有 ORT）skip 是合法的环境限制，只在汇总里显示。
-set(_case_extra_args "")
+# --fail-on-skip 的用意是"本该跑却静默跳过"（典型：有 ORT 时 ml 的对拍没跑）。
+# 但它不适用于**环境决定**的跳过：serial 的 9 条 PTY 用例在 Windows 上必然跳过
+# （没装 com0com 之类虚拟串口驱动），那是平台事实而不是回归，所以下面逐用例放行。
 if(MYLIB_ENABLE_ML AND MYLIB_INFER_BACKEND STREQUAL "onnxruntime")
-    list(APPEND _case_extra_args --fail-on-skip)
+    set(_strict_skip TRUE)
 endif()
 
 if(NOT CMAKE_CROSSCOMPILING)
     foreach(_name ${_case_names})
+        set(_this_args "")
+        if(_strict_skip AND NOT _name MATCHES "^serial_")
+            list(APPEND _this_args --fail-on-skip)
+        endif()
         add_test(NAME mylib_case_${_name} COMMAND mylib_tests --case=${_name}
-                 ${_case_extra_args})
+                 ${_this_args})
         set_tests_properties(mylib_case_${_name} PROPERTIES
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             LABELS "${_name}"
             TIMEOUT 300)
     endforeach()
-
     # 自检：用例注册机制坏了（某个 TU 忘了 MYTEST_SUITE）这里会暴露
     add_test(NAME mylib_list_cases COMMAND mylib_tests --list)
     set_tests_properties(mylib_list_cases PROPERTIES

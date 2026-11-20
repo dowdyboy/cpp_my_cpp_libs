@@ -152,6 +152,7 @@ python scripts/make_test_model.py models/identity_1x1x4.onnx
 | dsp | `my_cpp_libs::dsp` | pocketfft | **全平台（含 armv7）** | 频谱/PSD、FIR/IIR、混频抽取、突发检测、调制识别、AM/FM/ASK/FSK/BPSK 解调；**流式（分块）处理**：`FirFilter`/`BiquadFilter`/`ComplexMixer`/`Decimator`/`Agc` 跨块保持状态 |
 | ml | `my_cpp_libs::ml` | ONNX Runtime（模型由 skl2onnx 导出） | 随 infer（x64 + armv7） | sklearn 表格模型：双输出、特征顺序校验、类别名映射、批量推理；**不新增 C++ 三方库** |
 | net | `my_cpp_libs::net` | —（裸 socket） | **全平台** | TCP 客户端/服务端、UDP 广播组播、超时、SIGPIPE 安全、长度前缀分帧 |
+| **serial** | `my_cpp_libs::serial` | —（裸系统调用） | 全平台 | 串口：任意波特率(Windows)/标准档位(Linux)、超时读写、行读取、`flush`、端口枚举；PTY 上真跑收发；进 `-fno-exceptions` 子集 |
 | http | `my_cpp_libs::http` | cpp-httplib 0.66 | 全平台 | HTTP 客户端 + 服务端、JSON 便捷接口、线程池可配；公共头不暴露 httplib |
 | image | `my_cpp_libs::image` | stb_image 2.32 | **全平台（含 armv7）** | 解码/编码、缩放、letterbox→张量；**不依赖 OpenCV**，板端走这条 |
 | cv | `my_cpp_libs::cv` | OpenCV 4.12（可选） | x64 + **armv7**（`third_party/opencv-4.12.0-armv7`，随 `dist/` 的 armv7 包一起分发） | 图像 IO、letterbox 预处理、坐标逆变换 |
@@ -160,7 +161,7 @@ python scripts/make_test_model.py models/identity_1x1x4.onnx
 
 | 项目 | 结果 |
 |---|---|
-| 单元测试 | 宿主端 **261 个用例**（无 OpenCV）/ **269 个**（有 OpenCV，含 cv 8 个），另有 no-exceptions 子集 122 个；<br>板端 **158 / 158 通过（2026-11-16 上板实测，全组件，2 秒跑完）** ← 0.1.0 时的历史数据 |
+| 单元测试 | 宿主端 **290 个用例**（无 OpenCV）/ **298 个**（有 OpenCV，含 cv 8 个），另有 no-exceptions 子集 151 个；<br>板端 **158 / 158 通过（2026-11-16 上板实测，全组件，2 秒跑完）** ← 0.1.0 时的历史数据 |
 | 板端性能（Zynq-7020） | ml 表格模型 ≈0.07~0.10 ms/次；dsp 全链路 67 ms；image 957 ms；net 36 ms；http 141 ms（见 [06 §0](docs/06-板端验证手册.md)） |
 | 板端性能（Pi 4B / aarch64） | **158/158 通过（1 秒）**；ml 0.016~0.017 ms/次；bench_cnn 74 ms（比 A9 快 10.4×）（见 [06 §0.7](docs/06-板端验证手册.md)） |
 | **全依赖上板** | ✅ 8 个三方库全部有 armv7 产物：Eigen / nlohmann / spdlog / stb / pocketfft（头文件或源码）+ ORT 1.18.1 + ncnn + **OpenCV 4.12（GLIBC_2.29）** |
@@ -224,7 +225,7 @@ include/my_cpp_libs/    对外公共头
 src/                    组件实现
 examples/               封装层示例 + 原生 API 示例 + 独立消费方工程
 tools/                  命令行工具（model_inspect）+ 模型生成脚本 + sklearn 导出工具
-tests/                  无依赖的单元测试（261 个用例，开启 OpenCV 时 269 个；另有 no-exceptions 子集 122 个）
+tests/                  无依赖的单元测试（290 个用例，开启 OpenCV 时 298 个；另有 no-exceptions 子集 151 个）
 models/                 测试模型（脚本生成：7 种 ONNX 形态 + ml/ 下的 sklearn 演示模型与 golden）
 scripts/                构建脚本、ONNX Runtime / OpenCV 交叉编译脚本
 third_party/            由 resources/*.zip 自动解压（不入库）
@@ -250,6 +251,7 @@ docs/                   规划、API、构建、推理、OpenCV、板端验证�
   原子写为什么必要、测耗时为什么只能用单调时钟、线程池/周期任务的契约、配置分层合并
 - [Int8 量化实测](docs/12-量化实测.md) —— 我们自己的工具测出来的 1.36~2.03×、
   为什么小模型反而更慢、为什么合成校准集不可信、以及 ARMv7 上别照搬 x86 数字
+- [串口通信](docs/13-串口通信.md) —— 为什么自己封 COM/termios、超时为什么不算错误、PTY 上怎么真测、板端 dialout/by-id/流控实践
 
 ## 三方库来源
 

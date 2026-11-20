@@ -127,6 +127,16 @@ if(MYLIB_ENABLE_NET)
     list(APPEND MYLIB_TARGETS mylib_net)
 endif()
 
+# ---------------------------------------------------------------- serial（串口）
+# Windows COM（DCB + COMMTIMEOUTS + ClearCommError）与 Linux termios（poll + FIONREAD）
+# 的薄封装。只用系统调用 + Status，没有 try/catch，所以也在 -fno-exceptions 子集里。
+if(MYLIB_ENABLE_SERIAL)
+    mylib_add_component(serial
+        SOURCES serial/serial.cpp
+        LINK mylib_core)
+    target_compile_definitions(mylib_serial PUBLIC MYLIB_ENABLE_SERIAL_COMPONENT=1)
+    list(APPEND MYLIB_TARGETS mylib_serial)
+endif()
 # ---------------------------------------------------------------- http（客户端 + 服务端）
 # 依赖 cpp-httplib（单头文件）+ json（JSON 便捷接口）。公共头不暴露 httplib。
 if(MYLIB_ENABLE_HTTP)

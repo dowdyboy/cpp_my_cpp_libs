@@ -23,4 +23,5 @@ target_link_libraries(sdk_consumer PRIVATE
     my_cpp_libs::log
     my_cpp_libs::json
     my_cpp_libs::dsp
-    my_cpp_libs::net)
+    my_cpp_libs::net
+    my_cpp_libs::serial)

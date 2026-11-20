@@ -35,6 +35,7 @@ option(MYLIB_ENABLE_NCNN  "接入 ncnn 作为备选推理后端"          OFF)
 option(MYLIB_ENABLE_DSP   "信号处理组件（频谱/滤波/检测/识别/解调，pocketfft）" ON)
 option(MYLIB_ENABLE_ML    "机器学习组件（sklearn→ONNX 表格模型推理，依赖 infer+json）" ON)
 option(MYLIB_ENABLE_NET   "网络组件（TCP/UDP，无三方依赖）" ON)
+option(MYLIB_ENABLE_SERIAL "串口组件（Windows COM / Linux termios，无三方依赖）" ON)
 option(MYLIB_ENABLE_HTTP  "HTTP 组件（客户端+服务端，封装 cpp-httplib）" ON)
 option(MYLIB_ENABLE_IMAGE "图像组件（stb_image 解码/缩放/预处理，不依赖 OpenCV）" ON)
 option(MYLIB_ENABLE_CV    "图像组件（封装 OpenCV）"             OFF)
@@ -60,7 +61,7 @@ set(MYLIB_SANITIZE "" CACHE STRING "消毒器：留空 / address / undefined / t
 set_property(CACHE MYLIB_SANITIZE PROPERTY STRINGS "" address undefined thread)
 
 # 以 -fno-exceptions 编译本库（**只支持 core + math + dsp + net**，见文件末尾的校验）
-option(MYLIB_NO_EXCEPTIONS "以 -fno-exceptions 编译本库（只支持 core + math + dsp + net）" OFF)
+option(MYLIB_NO_EXCEPTIONS "以 -fno-exceptions 编译本库（只支持 core + math + dsp + net + io + time + serial）" OFF)
 
 # 三方依赖目录（默认在源码树 third_party，由 resources/*.zip 自动解压）
 set(MYLIB_DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party" CACHE PATH "已解压的三方库根目录")
@@ -99,6 +100,7 @@ endif()
 #            目前没验证过，先不放进承诺里。
 #   * log  ：SPDLOG_NO_EXCEPTIONS 能把编译打开，但"日志文件打不开"会退化成 abort，
 #            同样和"错误必须被返回"的设计原则冲突。
+# serial 只用 open/read/write/ioctl 这类系统调用 + Status，没有 try/catch，可以进这个子集。
 # dsp 用的是 pocketfft，已经在 Deps 里定义 POCKETFFT_NO_EXCEPTIONS（走 abort），
 # 自己一行 try/catch 都没有，所以可以进这个子集。
 #
@@ -122,7 +124,7 @@ if(MYLIB_NO_EXCEPTIONS)
     if(_noex_blocked)
         string(REPLACE ";" " / " _noex_str "${_noex_blocked}")
         message(FATAL_ERROR
-            "mylib-noex-conflict: MYLIB_NO_EXCEPTIONS=ON 目前只支持 core + math + dsp + net + io + time，以下组件还开着：${_noex_str}\n"
+            "mylib-noex-conflict: MYLIB_NO_EXCEPTIONS=ON 目前只支持 core + math + dsp + net + io + time + serial，以下组件还开着：${_noex_str}\n"
             "\n"
             "原因：这些组件用异常上报错误（nlohmann / ONNX Runtime / OpenCV / spdlog /\n"
             "      std::thread），关掉异常后只能退化成 abort()，会破坏 Status/Result 的契约。\n"
@@ -133,7 +135,7 @@ if(MYLIB_NO_EXCEPTIONS)
             "  -DMYLIB_ENABLE_LOG=OFF -DMYLIB_ENABLE_JSON=OFF \\\n"
             "  -DMYLIB_ENABLE_INFER=OFF -DMYLIB_ENABLE_IMAGE=OFF -DMYLIB_ENABLE_CV=OFF \\\n"
             "  -DMYLIB_ENABLE_HTTP=OFF -DMYLIB_ENABLE_THREAD=OFF\n"
-            "  （io 与 time 可以留着：它们只用 error_code 重载与 chrono，不抛异常）")
+            "  （io / time / serial 可以留着：它们只用 error_code / chrono / 系统调用，不抛异常）")
     endif()
 
     target_compile_definitions(mylib_noexcept INTERFACE MYLIB_NO_EXCEPTIONS=1)
