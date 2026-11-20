@@ -150,8 +150,13 @@ PY
 fetch_pocketfft
 
 if [ "$WITH_ORT_WIN" = "1" ]; then
-    fetch onnxruntime-win-x64-1.23.2.zip \
-          "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip"
+    # 这个直链在 2026-11-20 实测 404（多个版本都试过）。下载失败只告警：
+    # 拿不到 ORT 时 infer 退回 stub、ml 用例跳过，不该让 CI 因此变红。
+    if ! fetch onnxruntime-win-x64-1.23.2.zip \
+          "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip"; then
+        echo "[warn] ONNX Runtime 下载失败 —— infer 会退回 stub，ml 用例将跳过" >&2
+        if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::warning::ONNX Runtime 预编译包下载失败：ml 用例本轮将跳过"; fi
+    fi
 fi
 
 echo

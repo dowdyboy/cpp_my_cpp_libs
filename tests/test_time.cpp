@@ -122,5 +122,5 @@ MYTEST_CASE(time_scoped_timer_swallows_callback_exception) {
     // 同时断言回调**确实被调用**且拿到了正的耗时 —— 只写 CHECK(true) 的话，
     // "析构根本不调回调"也会通过。
     CHECK(recorded >= 0.0);
-    CHECK(recorded >= 0.003);
+    CHECK(recorded >= 0.002);   // 不低于 2ms，余量给 Windows 定时器粒度
 }

@@ -72,8 +72,8 @@ if(TARGET mylib_preprocess)
 endif()
 
 # 审计补齐的测试空洞：跨组件（time/json/math/io/net/thread/image），
-# 所以放在最后，按"这些 target 都存在"来门控。
-if(TARGET mylib_image AND TARGET mylib_net AND TARGET mylib_thread)
+# 所以放在最后，按"这些 target 都存在"来门控（math/json 也要：最小配置会把它们关掉）。
+if(TARGET mylib_image AND TARGET mylib_net AND TARGET mylib_thread AND TARGET mylib_math AND TARGET mylib_json)
     list(APPEND _test_sources test_gaps.cpp)
     list(APPEND _test_suites gaps)
     list(APPEND _test_links mylib_image mylib_net mylib_thread mylib_io mylib_json mylib_math mylib_time)

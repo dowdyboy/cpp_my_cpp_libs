@@ -718,10 +718,13 @@ jobs:
             -DMYLIB_BUILD_EXAMPLES=OFF \
             -DMYLIB_ENABLE_CV=ON \
             -DMYLIB_OPENCV_ROOT="$MYLIB_OPENCV_ROOT"
-      - name: 确认 cv 组件真的建出来了
-        run: test -f build/ci-cv/src/libmy_cpp_libs_cv.a
       - name: Build
         run: cmake --build build/ci-cv
+      - name: 确认 cv 组件真的建出来了（不是 configure 时被静默关掉）
+        run: |
+          set -e
+          ls build/ci-cv/src/*cv*.a
+          test -f build/ci-cv/src/libmy_cpp_libs_cv.a
       - name: Test（含 cv 的 8 条）
         run: ctest --test-dir build/ci-cv --output-on-failure
       - name: 确认 cv 用例真的跑了（不是全 skip）

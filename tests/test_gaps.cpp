@@ -64,7 +64,7 @@ MYTEST_CASE(gap_time_sleep_s_actually_sleeps) {
     const auto t0 = my::time::monotonic_us();
     my::time::sleep_s(0.02);
     const auto elapsed_ms = (my::time::monotonic_us() - t0) / 1000;
-    CHECK(elapsed_ms >= 15);   // 真的睡了（不是空实现）
+    CHECK(elapsed_ms >= 12);   // 真的睡了（Windows 定时器粒度 ~15.6ms，留点余量）
     CHECK(elapsed_ms < 2000);  // 也没睡过头
 }
 

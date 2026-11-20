@@ -91,8 +91,17 @@ Fetch 'spdlog-1.17.0.zip' 'https://github.com/gabime/spdlog/archive/refs/tags/v1
 Fetch 'json-include.zip'  'https://github.com/nlohmann/json/releases/download/v3.12.0/include.zip'
 
 if ($WithOrtWin) {
-    Fetch 'onnxruntime-win-x64-1.23.2.zip' `
-          'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip'
+    # 注意：这个直链在 2026-11-20 实测是 404（v1.19.2/1.20/1.21/1.22/1.23.0/1.23.2 全试过）。
+    # ONNX Runtime 的官方预编译包会改发布位置，所以这里**下载失败只告警**：
+    # 拿不到 ORT 时 infer 退回 stub、ml 用例会 skip —— 那是可接受的环境限制，
+    # 不该让整个 CI 因为一个三方下载地址变动而变红。
+    try {
+        Fetch 'onnxruntime-win-x64-1.23.2.zip' `
+              'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip'
+    } catch {
+        Write-Warning "ONNX Runtime 下载失败（$($_.Exception.Message)）—— infer 会退回 stub，ml 用例将跳过"
+        if ($env:GITHUB_ACTIONS) { Write-Host "::warning::ONNX Runtime 预编译包下载失败：ml 用例本轮将跳过" }
+    }
 }
 
 # ---------------------------------------------------------------- 单头文件库（按 commit 固定）
