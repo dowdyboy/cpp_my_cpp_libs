@@ -242,3 +242,39 @@ MYTEST_CASE(io_absolute_path) {
     // 绝对路径必然含分隔符
     CHECK(abs.value().find('/') != std::string::npos || abs.value().find('\\') != std::string::npos);
 }
+
+// UTF-8 路径：Windows 上如果没把 UTF-8 显式转成 UTF-16（而依赖 ANSI 代码页），
+// 中文路径会直接坏掉 —— 这条用例就是那个 bug 的守门员。
+MYTEST_CASE(io_utf8_path_roundtrip) {
+    const std::string base = my::io::join(my::io::current_dir(), "io_utf8_测试_dir");
+    (void)my::io::remove_all(base);
+
+    CHECK(my::io::create_directories(base).ok());
+    CHECK(my::io::is_directory(base));
+
+    const std::string file = my::io::join(base, "文件-测试.txt");
+    CHECK(my::io::write_file(file, "hello 中文").ok());
+    CHECK(my::io::exists(file));
+
+    auto rd = my::io::read_file(file);
+    CHECK_OK_VALUE(text, rd);
+    CHECK_EQ(text, std::string("hello 中文"));
+
+    // 列目录返回的名字必须还是 UTF-8（不能变成 ANSI 乱码）
+    auto entries = my::io::list_dir(base);
+    CHECK(entries.ok());
+    if (entries.ok()) {
+        bool found = false;
+        for (const auto& e : entries.value()) {
+            if (e == "文件-测试.txt") found = true;
+        }
+        CHECK(found);
+    }
+
+    // 路径拆分同样不能丢掉非 ASCII
+    CHECK_EQ(my::io::filename(file), std::string("文件-测试.txt"));
+    CHECK_EQ(my::io::extension(file), std::string(".txt"));
+
+    CHECK(my::io::remove_all(base).ok());
+    CHECK(!my::io::exists(base));
+}

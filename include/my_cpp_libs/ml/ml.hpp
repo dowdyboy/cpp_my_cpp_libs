@@ -45,6 +45,9 @@ struct Meta {
     std::string              input_name;
     std::string              label_output;  ///< 分类器的 int 输出（回归器为空）
     std::string              score_output;  ///< 概率 / 回归值的 float 输出
+    /// sidecar 里记录的 .onnx 的 sha256（小写十六进制；没记录则为空）。
+    /// load() 默认会拿它核对模型文件，见 load() 的 verify_hash 参数。
+    std::string              onnx_sha256;
 };
 
 struct Prediction {
@@ -71,8 +74,13 @@ public:
     /// @param sidecar     .json 路径；留空则自动找同名 .json
     ///
     /// 没有 sidecar 也能用（类别名/特征名缺失），但特征数必须是静态的。
+    ///
+    /// @param verify_hash sidecar 里记了 `sha256` 时，是否核对模型文件。
+    ///        默认**核对**：模型被截断/被换掉/量化后忘了更新 sidecar 都会在这里报出来，
+    ///        而不是等到推理结果莫名其妙。想跳过（比如故意换模型做实验）就传 false。
     MYLIB_API static Result<Model> load(const std::string& onnx_path,
-                                        const std::string& sidecar_path = std::string());
+                                        const std::string& sidecar_path = std::string(),
+                                        bool               verify_hash  = true);
 
     /// 批量推理：features 长度必须是 n_features 的整数倍，样本数 = size / n_features。
     MYLIB_API Result<std::vector<Prediction>> predict(const std::vector<float>& features);

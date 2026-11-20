@@ -1,3 +1,4 @@
+#include "my_cpp_libs/core/hash.hpp"
 #include "my_cpp_libs/ml/ml.hpp"
 
 #include <algorithm>
@@ -37,7 +38,8 @@ std::size_t Prediction::argmax() const noexcept {
 // -----------------------------------------------------------------------------
 //  加载
 // -----------------------------------------------------------------------------
-Result<Model> Model::load(const std::string& onnx_path, const std::string& sidecar_path) {
+Result<Model> Model::load(const std::string& onnx_path, const std::string& sidecar_path,
+                          bool verify_hash) {
     if (onnx_path.empty()) return Status(Errc::InvalidArgument, "模型路径为空");
     if (!file_exists(onnx_path)) {
         return Status(Errc::NotFound, "模型文件不存在: " + onnx_path);
@@ -93,6 +95,20 @@ Result<Model> Model::load(const std::string& onnx_path, const std::string& sidec
         if (!st) return st;
     }
 
+    // 模型自校验：sidecar 里记了 sha256 就核对一遍。
+    // 这条的价值在于"换了模型文件但忘了更新 sidecar"这种事故 —— 否则表现是
+    // 推理结果莫名其妙，而不是一个明确的加载错误。
+    if (verify_hash && !m.meta_.onnx_sha256.empty()) {
+        auto actual = my::hash::sha256_file_hex(onnx_path);
+        if (!actual) return actual.status();
+        if (!my::hash::digest_equal(actual.value(), m.meta_.onnx_sha256)) {
+            return Status(Errc::ParseError,
+                          "模型文件与 sidecar 记录的 sha256 不一致: " + onnx_path + "（实际 " +
+                              actual.value() + "，期望 " + m.meta_.onnx_sha256 +
+                              "）。如果是有意替换模型，请同步更新 sidecar 或传 verify_hash=false");
+        }
+    }
+
     if (m.meta_.n_features <= 0) {
         return Status(Errc::InvalidArgument,
                       "无法确定特征数（输入是动态维度）：请提供同名的 .json sidecar");
@@ -127,6 +143,9 @@ Status Model::load_sidecar(const std::string& path) {
     } else {
         return Status(Errc::ParseError, "sidecar 的 kind 只能是 classifier/regressor: " + kind);
     }
+
+    // 模型文件摘要（导出脚本写进去的）。没有这个字段就不校验 —— 兼容老 sidecar。
+    meta_.onnx_sha256 = d.get_or<std::string>("sha256", "");
 
     // ---- 输入 ----
     if (auto r = d.get<std::string>("input.name"); r) {

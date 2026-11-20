@@ -8,6 +8,7 @@
 // =============================================================================
 
 #include "my_cpp_libs/core/build_info.hpp"
+#include "my_cpp_libs/core/hash.hpp"
 #include "my_cpp_libs/core/status.hpp"
 
 // 0.1.2 的三个工程底座组件（都只依赖 core，可进 -fno-exceptions 子集的只有 io/time）
@@ -57,6 +58,11 @@
 #endif
 
 // http 组件（客户端+服务端，封装 cpp-httplib）
+// serial 组件（Windows COM / Linux termios）
+#if defined(MYLIB_ENABLE_SERIAL_COMPONENT)
+#  include "my_cpp_libs/serial/serial.hpp"
+#endif
+
 #if defined(MYLIB_ENABLE_HTTP_COMPONENT)
 #  include "my_cpp_libs/http/http.hpp"
 #endif

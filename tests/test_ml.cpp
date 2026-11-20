@@ -10,6 +10,7 @@
 //  因为 ml 组件本来就依赖 infer 的 ORT 后端。
 // =============================================================================
 
+#include "my_cpp_libs/io/io.hpp"
 #include "my_cpp_libs/ml/ml.hpp"
 
 #include <cmath>
@@ -260,4 +261,51 @@ MYTEST_CASE(ml_unloaded_model_reports_error) {
     auto batch = m.predict({1.0f, 2.0f, 3.0f, 4.0f});
     CHECK(!batch);
     CHECK_EQ(batch.status().code(), my::Errc::NotInitialized);
+}
+
+// sidecar 里记的 sha256 必须与模型文件一致。
+//
+// 这条守的是"换了模型但忘了更新 sidecar"这类事故：以前的表现是推理结果莫名其妙，
+// 现在是一个明确的加载错误。verify_hash=false 用于故意换模型做实验的场景。
+MYTEST_CASE(ml_rejects_model_hash_mismatch) {
+    if (!ml_ready()) MYTEST_SKIP("没有可用的推理后端");
+
+    const std::string src_onnx = models_root() + "/ml/iris_logreg.onnx";
+    const std::string src_json = models_root() + "/ml/iris_logreg.json";
+    auto              onnx_txt = my::io::read_file(src_onnx);
+    auto              json_txt = my::io::read_file(src_json);
+    CHECK(onnx_txt.ok());
+    CHECK(json_txt.ok());
+    if (!onnx_txt.ok() || !json_txt.ok()) return;
+
+    // 造一个哈希不对的 sidecar：把 sha256 的最后一位改掉
+    std::string tampered = json_txt.value();
+    const auto  pos      = tampered.find("\"sha256\"");
+    CHECK(pos != std::string::npos);
+    if (pos == std::string::npos) return;
+    const auto quote = tampered.find('"', tampered.find(':', pos) + 1);
+    CHECK(quote != std::string::npos);
+    if (quote == std::string::npos) return;
+    const char flipped = (tampered[quote + 1] == '0') ? '1' : '0';
+    tampered[quote + 1] = flipped;
+
+#if defined(_WIN32)
+    const std::string dir = std::string(std::getenv("TEMP") ? std::getenv("TEMP") : ".") + "\\mylib_ml_hash";
+#else
+    const std::string dir = std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp") + "/mylib_ml_hash";
+#endif
+    const std::string tmp_onnx = dir + "/iris_logreg.onnx";
+    const std::string tmp_json = dir + "/iris_logreg.json";
+    (void)my::io::create_directories(dir);
+    CHECK(my::io::write_file(tmp_onnx, onnx_txt.value()).ok());
+    CHECK(my::io::write_file(tmp_json, tampered).ok());
+
+    auto bad = my::ml::Model::load(tmp_onnx, tmp_json);  // 默认 verify_hash = true
+    CHECK(!bad.ok());
+    CHECK(bad.status().code() == my::Errc::ParseError);
+    CHECK(bad.status().message().find("sha256") != std::string::npos);
+
+    // 明确关掉校验时应当加载成功（模型本身是好的）
+    auto relaxed = my::ml::Model::load(tmp_onnx, tmp_json, /*verify_hash=*/false);
+    CHECK(relaxed.ok());
 }

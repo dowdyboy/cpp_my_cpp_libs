@@ -14,8 +14,8 @@
 #
 #  另外保留一个 --list 自检：用例注册机制坏了（某个 TU 忘了 MYTEST_SUITE）会暴露。
 # =============================================================================
-set(_test_sources test_main.cpp test_framework_self.cpp test_core.cpp)
-set(_test_suites core)
+set(_test_sources test_main.cpp test_framework_self.cpp test_core.cpp test_hash.cpp)
+set(_test_suites core hash)
 set(_test_links mylib_core)
 
 if(TARGET mylib_log)
@@ -64,7 +64,7 @@ if(TARGET mylib_infer)
 endif()
 
 # preprocess 是独立 target（image/http/cv 也会用到），不能挂在 infer 下面：
-# 否则 -DMYLIB_ENABLE_INFER=OFF 时这 22 个用例会静默消失。
+# 否则 -DMYLIB_ENABLE_INFER=OFF 时这 25 个用例会静默消失。
 if(TARGET mylib_preprocess)
     list(APPEND _test_sources test_preprocess.cpp)
     list(APPEND _test_suites preprocess)

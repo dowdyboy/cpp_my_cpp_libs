@@ -15,7 +15,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(my_cpp_libs
-    VERSION 0.1.6
+    VERSION 0.1.7
     DESCRIPTION "Unified cross-platform C++ wrapper over third-party open-source libraries"
     LANGUAGES CXX)
 
@@ -450,7 +450,7 @@ message(STATUS "  ONNX Runtime    : ${_ort_pkg}")
 message(STATUS "  ncnn            : ${_ncnn_pkg}")
 message(STATUS "  OpenCV          : ${_cv_pkg}")
 if(MYLIB_NO_EXCEPTIONS)
-    message(STATUS "  Exceptions      : 关闭（-fno-exceptions，仅 core + math + dsp + net）")
+    message(STATUS "  Exceptions      : 关闭（-fno-exceptions，仅 core + math + dsp + net + io + time + serial）")
 endif()
 if(MYLIB_SANITIZE)
     message(STATUS "  Sanitizer       : ${MYLIB_SANITIZE}")

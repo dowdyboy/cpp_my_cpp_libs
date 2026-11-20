@@ -35,7 +35,7 @@ int main(int argc, char** argv) {
     my::log::Config cfg;
     cfg.level      = my::log::Level::Info;
     cfg.to_console = true;
-    my::log::init(cfg);
+    (void)my::log::init(cfg);
 
     const std::string model_path =
         (argc > 1) ? argv[1] : "models/ml/iris_logreg.onnx";

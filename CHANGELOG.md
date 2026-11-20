@@ -1,5 +1,58 @@
 # 变更记录
 
+## 0.1.7（2026-11-20）—— SHA-256 + io 的 UTF-8 路径修复
+
+### 1. `my::hash`：SHA-256（`core` 组件里，无三方依赖）
+
+`my::hash::sha256_hex()` / `Sha256`（增量）/ `sha256_file_hex()`（16 KiB 分块）/
+`digest_equal()`（**常数时间**比较）。
+
+为什么自己写：板端要校验"这个 .onnx / 固件 / 数据文件是不是我以为的那个"，需要的只是
+一个哈希函数；引 OpenSSL 等于为 200 行代码拖进一个几 MB 的库，交叉编译还多一层坑。
+
+正确性靠公开测试向量（NIST/FIPS 180-4）守着：空串、`"abc"`、两个块的串、100 万个 `'a'`，
+外加"分段喂 vs 一次喂结果相同"（含 63/64/65 这些块边界）、空文件、复用对象、缺文件路径。
+另与 Windows 的 `Get-FileHash` 对同一批模型文件交叉验证过一次。
+
+**它已经用起来了**：`my::ml::Model::load()` 现在默认核对 sidecar 里记录的模型 sha256
+（`verify_hash` 参数可关）。守的是"换了模型但忘了更新 sidecar" —— 以前的表现是推理结果
+莫名其妙，现在是一个明确的加载错误。仓库里三个模型文件的 sidecar 哈希已核对一致。
+
+### 2. 修掉一个真 bug：`io` 的 UTF-8 路径（Windows）
+
+头文件一直写着"路径用 UTF-8 std::string（Windows 上内部转宽字符）"，**但实现里根本没有转换**：
+`fs::path(std::string)` 与 `std::ofstream(std::string)` 在 Windows 上走的是当前 ANSI 代码页，
+**中文/日文路径直接坏掉**。
+
+- `io.cpp` 新增 `to_path()` / `from_path()`：UTF-8 ↔ UTF-16（`MultiByteToWideChar`/`WideCharToMultiByte`）；
+- 所有 `fs::path(std::string)` 与文件流构造改走它们（19 处 + 3 处流构造）；
+- `.u8string()` 全部换成 `from_path()`（C++20 里 `u8string()` 返回 `std::u8string`，换了标准就编译不过）；
+- 新增用例 `io_utf8_path_roundtrip`：中文目录 + 中文文件名 + 写读 + 列目录 + 路径拆分。
+  **它在修复前是红的**（`write_file` 直接失败），修复后绿 —— 这就是这类 bug 该有的验证方式。
+
+### 3. 一轮文档/注释审计（15 处）
+
+派了个只读审计跑了一遍"文档 vs 真实情况"，修掉其中能确证的：
+
+| 类型 | 例子 |
+|---|---|
+| 过时数字 | docs/01 的"199 个用例"（0.1.0 快照，已标注）、docs/08 的"33 个用例"（实际 55）、docs/06 的板端套件数（加历史快照说明）、README 用例数、docs/03 的"261 个进程" |
+| 失效示例 | docs/13 的 `write_file(buf, n)`（无此重载）、`now_unix()`（应为 `unix_ms()`）、`ThreadPool pool(2)`（应为 `create(2)`） |
+| 漏改的组件清单 | 汇总头 `my_cpp_libs.hpp` 缺 serial 块；README 顶层组件列表缺 io/time/thread/serial；configure 摘要仍写"仅 core+math+dsp+net" |
+| 版本漂移 | README 的 SDK 表还写着 0.1.2 的包名 |
+| 复制粘贴残留 | README 里同一段"包名后缀是显式参数"出现两遍；板端部署命令两行粘成一行 |
+| 注释与代码不符 | `hash.hpp` 说"64 KiB 分块"（实际 16 KiB）；`tests/CMakeLists.txt` 说 preprocess 22 个（实际 25）；`build-all.ps1` 说 5 个预设（实际 6） |
+| Markdown 破损 | README 一个代码围栏写成单反引号，导致后面整段渲染错乱 |
+
+### 4. 验证
+
+| 配置 | 结果 |
+|---|---|
+| MinGW x64 Release | **302/302**（300 用例 + 2 守卫），零告警 |
+| `-fno-exceptions` 子集 | core+math+dsp+net+io+time+serial，含 hash 与 UTF-8 路径用例 |
+| 中文路径 | `io_utf8_path_roundtrip` 修复前红、修复后绿（MinGW） |
+| 模型校验 | 三个 sidecar 的 sha256 与真实文件一致；篡改用例在 MSVC（有 ORT）跑 |
+
 ## 0.1.6（2026-11-20）—— serial 串口组件
 
 第 16 个组件：Windows COM / Linux termios 的薄封装，无三方依赖。

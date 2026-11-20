@@ -12,7 +12,7 @@
 用同一份 CMake 配置完成编译，业务代码不需要写平台分支。
 
 ```
-业务代码  ->  my_cpp_libs::{core, log, json, math, infer, image, dsp, ml, net, http, cv}
+业务代码  ->  my_cpp_libs::{core, io, time, thread, log, json, math, infer, image, dsp, ml, net, serial, http, cv}
           ->  spdlog / nlohmann / Eigen / ONNX Runtime / stb / pocketfft / cpp-httplib / OpenCV(可选)
 ```
 
@@ -25,15 +25,15 @@
 
 ## 预编译 SDK（`dist/`）
 
-全量包（含 ORT/OpenCV），拿到目录即可 `find_package`。**0.1.2 起由 CPack 生成**，
+全量包（含 ORT/OpenCV），拿到目录即可 `find_package`。**0.1.3 起由 CPack 生成**，历史版本见 GitHub Releases；
 每个包都带 `share/licenses/`（我们的 MIT + 全部三方原始许可证 + `THIRD_PARTY_NOTICES.md`）。
 
 | 包 | 平台/工具链 | 内含 |
 |---|---|---|
-| `my_cpp_libs-0.1.2-win-x64-msvc.zip` | Windows x64 / MSVC 19.5x | ORT 1.23.2 + ncnn + OpenCV 4.12（DLL 在 `bin/`） |
-| `my_cpp_libs-0.1.2-win-x64-mingw-basic.zip` | Windows x64 / MinGW GCC 15.2 | **基础包**：无 ORT/OpenCV（ABI 不兼容，见 Deps.cmake） |
-| `my_cpp_libs-0.1.2-linux-armv7-glibc239.tar.gz` | armv7-A 硬浮点（2024 SDK，**glibc ≥ 2.38**） | ORT 1.18.1 + OpenCV 4.12 |
-| `my_cpp_libs-0.1.2-linux-aarch64.tar.gz` | Pi 4B / 通用 aarch64（ARM GNU 14.2，glibc ≈ 2.40） | ORT 1.19.2 + OpenCV 4.12 |
+| `my_cpp_libs-0.1.7-win-x64-msvc.zip` | Windows x64 / MSVC 19.5x | ORT 1.23.2 + ncnn + OpenCV 4.12（DLL 在 `bin/`） |
+| `my_cpp_libs-0.1.7-win-x64-mingw-basic.zip` | Windows x64 / MinGW GCC 15.2 | **基础包**：无 ORT/OpenCV（ABI 不兼容，见 Deps.cmake） |
+| `my_cpp_libs-0.1.7-linux-armv7-glibc239.tar.gz` | armv7-A 硬浮点（2024 SDK，**glibc ≥ 2.38**） | ORT 1.18.1 + OpenCV 4.12 |
+| `my_cpp_libs-0.1.7-linux-aarch64.tar.gz` | Pi 4B / 通用 aarch64（ARM GNU 14.2，glibc ≈ 2.40） | ORT 1.19.2 + OpenCV 4.12 |
 
 ```cmake
 find_package(my_cpp_libs CONFIG REQUIRED)
@@ -53,7 +53,7 @@ my_cpp_libs_copy_runtime_dlls(app)   # 仅 Windows
 
 ```powershell
 .\scripts\package-all.ps1          # 四个包 → dist/
-.\scripts\verify-package.ps1 -Package dist\my_cpp_libs-0.1.4-win-x64-msvc.zip
+.\scripts\verify-package.ps1 -Package dist\my_cpp_libs-0.1.7-win-x64-msvc.zip
 ```
 
 CI 里也有两个 `package-*` job（`package-linux` / `package-windows`）跑同一套 CPack 流程，
@@ -66,10 +66,6 @@ CI 里也有两个 `package-*` job（`package-linux` / `package-windows`）跑�
 | `linux-*-glibcNNN` | 本机 | ORT + OpenCV |
 | `linux-*-glibcNNN-basic` | CI `package-linux` | 无 ORT/OpenCV（交叉预编译包不进 CI 依赖） |
 | `win-x64-mingw-basic` | 本机/CI | 无 ORT/OpenCV（ABI 不兼容） |
-
-包名后缀是**显式参数**而不是猜出来的：glibc 版本 CMake 推不出来，必须由构建者给，
-否则很容易把"能编"误当成"能上板"。打包时缺任何三方许可证会打印
-`[pkg] 找不到许可证 ...` —— 出现这行就说明这个包不该发布。
 
 > 包名后缀是**显式参数**而不是猜出来的：glibc 版本 CMake 推不出来，必须由构建者给，
 > 否则很容易把"能编"误当成"能上板"。打包脚本在缺任何三方许可证时会打印
@@ -141,7 +137,7 @@ python scripts/make_test_model.py models/identity_1x1x4.onnx
 
 | 组件 | target | 底层库 | 平台覆盖 | 说明 |
 |---|---|---|---|---|
-| core | `my_cpp_libs::core` | — | 全平台 | `Status` / `Result<T>` / 构建信息 / fp16 转换 |
+| core | `my_cpp_libs::core` | — | 全平台 | `Status` / `Result<T>` / 构建信息 / fp16 转换 / **SHA-256**（`my::hash`） |
 | **io** | `my_cpp_libs::io` | `std::filesystem` | 全平台（含 armv7） | 文件/目录/路径/临时文件；**原子写**（临时文件 + rename）；不抛异常，进 `-fno-exceptions` 子集 |
 | **time** | `my_cpp_libs::time` | `<chrono>` | 全平台（含 armv7） | 单调时钟（测耗时）、UTC 时间戳、`Stopwatch`/`ScopedTimer`；进 `-fno-exceptions` 子集 |
 | **thread** | `my_cpp_libs::thread` | `<thread>` | 全平台（含 armv7） | 线程池、有界阻塞队列、周期任务；析构必 drain+join |
@@ -161,7 +157,7 @@ python scripts/make_test_model.py models/identity_1x1x4.onnx
 
 | 项目 | 结果 |
 |---|---|
-| 单元测试 | 宿主端 **290 个用例**（无 OpenCV）/ **298 个**（有 OpenCV，含 cv 8 个），另有 no-exceptions 子集 151 个；<br>板端 **158 / 158 通过（2026-11-16 上板实测，全组件，2 秒跑完）** ← 0.1.0 时的历史数据 |
+| 单元测试 | 宿主端 **300 个用例**（无 OpenCV）/ **308 个**（有 OpenCV，含 cv 8 个），另有 no-exceptions 子集 160 个；<br>板端 **158 / 158 通过（2026-11-16 上板实测，全组件，2 秒跑完）** ← 0.1.0 时的历史数据 |
 | 板端性能（Zynq-7020） | ml 表格模型 ≈0.07~0.10 ms/次；dsp 全链路 67 ms；image 957 ms；net 36 ms；http 141 ms（见 [06 §0](docs/06-板端验证手册.md)） |
 | 板端性能（Pi 4B / aarch64） | **158/158 通过（1 秒）**；ml 0.016~0.017 ms/次；bench_cnn 74 ms（比 A9 快 10.4×）（见 [06 §0.7](docs/06-板端验证手册.md)） |
 | **全依赖上板** | ✅ 8 个三方库全部有 armv7 产物：Eigen / nlohmann / spdlog / stb / pocketfft（头文件或源码）+ ORT 1.18.1 + ncnn + **OpenCV 4.12（GLIBC_2.29）** |
@@ -177,7 +173,7 @@ python scripts/make_test_model.py models/identity_1x1x4.onnx
 
 ## 一个最小可用服务骨架
 
-`powershell
+```powershell
 # 配置（默认值 ← config.json ← 环境变量 ← 命令行）→ 日志 → 线程池 → 周期任务 → 原子写结果
 .\build\win-mingw\bin\example_app_skeleton.exe
 .\build\win-mingw\bin\example_app_skeleton.exe --worker.count=4 --worker.iterations=2000
@@ -185,7 +181,7 @@ $env:MYAPP__WORKER__COUNT=8; .\build\win-mingw\bin\example_app_skeleton.exe
 
 # 板端（armv7 静态版，不依赖任何 .so）
 ./example_app_skeleton --output.path=/tmp/result.json
-`
+```
 
 见 [基础组件文档](docs/11-基础组件.md)。
 
@@ -205,7 +201,9 @@ model_inspect models\ncnn\small_cnn.param --run --shape 1,3,32,32 --dump output\
 python tools\compare_outputs.py output\a.txt output\b.txt
 
 # 板端部署（板子到手后）
-.\scripts\deploy-and-bench.ps1 -Board <ip> -User root.\scripts\deploy-and-bench.ps1 -Package     # 板子还没到：先打离线包
+.\scripts\deploy-and-bench.ps1 -Board <ip> -User root
+# 板子不在手边：先打离线包（03 §5 讲了怎么手工放上去）
+.\scripts\deploy-and-bench.ps1 -Package
 # ASan/UBSan 检查（WSL）
 wsl -d Ubuntu-24.04 -u root -- bash scripts/run-tests-asan-wsl.sh
 ```
@@ -225,7 +223,7 @@ include/my_cpp_libs/    对外公共头
 src/                    组件实现
 examples/               封装层示例 + 原生 API 示例 + 独立消费方工程
 tools/                  命令行工具（model_inspect）+ 模型生成脚本 + sklearn 导出工具
-tests/                  无依赖的单元测试（290 个用例，开启 OpenCV 时 298 个；另有 no-exceptions 子集 151 个）
+tests/                  无依赖的单元测试（300 个用例，开启 OpenCV 时 308 个；另有 no-exceptions 子集 160 个）
 models/                 测试模型（脚本生成：7 种 ONNX 形态 + ml/ 下的 sklearn 演示模型与 golden）
 scripts/                构建脚本、ONNX Runtime / OpenCV 交叉编译脚本
 third_party/            由 resources/*.zip 自动解压（不入库）
