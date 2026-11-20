@@ -1,15 +1,16 @@
 # Rebuild all four SDK packages at the current version via CPack.
 # ASCII only (PS 5.1 reads BOM-less files as ANSI).
 $ErrorActionPreference = 'Continue'
-$root = Split-Path -Parent $PSScriptRoot   # 本脚本在 scripts/ 下
+$root = Split-Path -Parent $PSScriptRoot   # this script lives in scripts/
 Set-Location $root
 $env:PATH = "D:\ProgramFiles\msys64\ucrt64\bin;D:\ProgramFiles\ninja-win;$env:PATH"
 $gxx = "D:/ProgramFiles/msys64/ucrt64/bin/g++.exe"
 $ninja = "D:/ProgramFiles/ninja-win/ninja.exe"
-# 注意：SDK 包里**不打包 ncnn**（它的静态库还带 openmp/vulkan 这些传递依赖，
-# 一起打进包再在 Config 里复现链接关系容易出第二类"缺符号"问题）。所以这里显式关掉，
-# 让 libmy_cpp_libs_infer 不带 ncnn 符号引用 —— 0.1.7 及以前的包是 ON 的，
-# 结果"链 my_cpp_libs::infer"的消费方必然 undefined。想用 ncnn 就自己从源码构建。
+# NOTE: the SDK package does NOT ship ncnn. Its static lib pulls openmp/vulkan
+# transitive deps, and reproducing that in the package Config is how you get a
+# second class of "undefined symbol" bugs. So build packages with NCNN=OFF, which
+# keeps libmy_cpp_libs_infer free of ncnn references. (0.1.7 and earlier had it ON,
+# so any consumer linking my_cpp_libs::infer failed to link.) Want ncnn? Build from source.
 $log = "$root\build\_logs\pkg-all.txt"
 "" | Out-File -Encoding utf8 $log
 function Say($m) { Write-Host $m; $m | Out-File -Encoding utf8 -Append $log }

@@ -6,7 +6,7 @@ param(
     [ValidateSet('host', 'cross')][string] $Mode = 'host'
 )
 $ErrorActionPreference = 'Continue'
-$root = Split-Path -Parent $PSScriptRoot   # 本脚本在 scripts/ 下
+$root = Split-Path -Parent $PSScriptRoot   # this script lives in scripts/
 Set-Location $root
 $env:PATH = "D:\ProgramFiles\msys64\ucrt64\bin;D:\ProgramFiles\ninja-win;$env:PATH"
 
@@ -95,6 +95,14 @@ if ($Mode -eq 'host') {
         Write-Host "  consumer run exit=$LASTEXITCODE"
         $out | Select-Object -Last 6 | ForEach-Object { Write-Host "   $_" }
     } else { Write-Host "  consumer exe missing"; exit 1 }
+
+    # Component-level consumer: catches "component does not carry core" and
+    $min = Get-ChildItem $bdir -Recurse -Filter 'sdk_consumer_min.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $min) { Write-Host "  consumer_min exe missing"; exit 1 }
+    $out2 = & $min.FullName 2>&1
+    Write-Host "  consumer_min run exit=$LASTEXITCODE"
+    $out2 | Select-Object -Last 4 | ForEach-Object { Write-Host "   $_" }
+    if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL: component-level link check"; exit 1 }
 } else {
     Write-Host "== cross package: check ELF arch of shipped static libs =="
     $ar = (Get-ChildItem (Join-Path $prefix 'lib') -File -Filter '*.a' -ErrorAction SilentlyContinue | Select-Object -First 1)
@@ -103,3 +111,4 @@ if ($Mode -eq 'host') {
 
 Write-Host "== RESULT: $(if ($bad -eq 0) { 'OK' } else { "$bad missing" }) =="
 exit $bad
+
