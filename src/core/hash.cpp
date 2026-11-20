@@ -13,9 +13,9 @@
 // =============================================================================
 
 #include "my_cpp_libs/core/hash.hpp"
+#include "my_cpp_libs/core/path_utf8.hpp"
 
-#include <cerrno>
-#include <cstdio>
+#include <fstream>
 #include <cstring>
 #include <string>
 
@@ -194,31 +194,23 @@ std::string sha256_hex(std::string_view text) {
 }
 
 Result<std::string> sha256_file_hex(const std::string& path) {
-    std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (f == nullptr) {
-        const int err = errno;
-        return Status(Errc::IoError,
-                      "打开文件失败: " + path + " (" + std::strerror(err) +
-                          ", errno=" + std::to_string(err) + ")");
+    // 用 ifstream + core::to_path 而不是 fopen(path.c_str())：后者在 Windows 上
+    // 按 ANSI 代码页解释路径，中文/日文的 UTF-8 路径打不开（0.1.7 的同类缺陷）。
+    std::ifstream in(core::to_path(path), std::ios::binary);
+    if (!in) {
+        return Status(Errc::IoError, "打开文件失败: " + path);
     }
 
     Sha256 h;
-    // 16 KiB 是"读得够快"与"板端栈不紧张"的折中：Zynq 的默认栈 8 MB，
-    // 但库函数不该一口气吃掉 64 KiB 栈。
+    // 16 KiB 是"读得够快"与"板端栈不紧张"的折中。
     std::uint8_t buf[16 * 1024];
-    bool         read_error = false;
-
     for (;;) {
-        const std::size_t n = std::fread(buf, 1, sizeof buf, f);
-        if (n != 0) h.update(buf, n);
-        if (n < sizeof buf) {
-            read_error = (std::ferror(f) != 0);
-            break;
-        }
+        in.read(reinterpret_cast<char*>(buf), static_cast<std::streamsize>(sizeof buf));
+        const std::streamsize n = in.gcount();
+        if (n > 0) h.update(buf, static_cast<std::size_t>(n));
+        if (n < static_cast<std::streamsize>(sizeof buf)) break;
     }
-    std::fclose(f);
-
-    if (read_error) return Status(Errc::IoError, "读文件失败: " + path);
+    if (in.bad()) return Status(Errc::IoError, "读文件失败: " + path);
     return h.hex_digest();
 }
 

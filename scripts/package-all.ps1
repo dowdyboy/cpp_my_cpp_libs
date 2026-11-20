@@ -6,6 +6,10 @@ Set-Location $root
 $env:PATH = "D:\ProgramFiles\msys64\ucrt64\bin;D:\ProgramFiles\ninja-win;$env:PATH"
 $gxx = "D:/ProgramFiles/msys64/ucrt64/bin/g++.exe"
 $ninja = "D:/ProgramFiles/ninja-win/ninja.exe"
+# 注意：SDK 包里**不打包 ncnn**（它的静态库还带 openmp/vulkan 这些传递依赖，
+# 一起打进包再在 Config 里复现链接关系容易出第二类"缺符号"问题）。所以这里显式关掉，
+# 让 libmy_cpp_libs_infer 不带 ncnn 符号引用 —— 0.1.7 及以前的包是 ON 的，
+# 结果"链 my_cpp_libs::infer"的消费方必然 undefined。想用 ncnn 就自己从源码构建。
 $log = "$root\build\_logs\pkg-all.txt"
 "" | Out-File -Encoding utf8 $log
 function Say($m) { Write-Host $m; $m | Out-File -Encoding utf8 -Append $log }
@@ -25,7 +29,7 @@ Say "   cpack=$LASTEXITCODE  $(Select-String -Path "$root\build\_logs\pkg-mingw-
 # ---- 2. MSVC full ----
 Say "== package: win-x64-msvc =="
 cmake -S . -B build\pkg-msvc -A x64 -DMYLIB_BUILD_EXAMPLES=OFF -DMYLIB_BUILD_TESTS=OFF `
-  -DMYLIB_BUILD_TOOLS=OFF -DMYLIB_ENABLE_CV=ON -DMYLIB_ENABLE_NCNN=ON `
+  -DMYLIB_BUILD_TOOLS=OFF -DMYLIB_ENABLE_CV=ON -DMYLIB_ENABLE_NCNN=OFF `
   -DMYLIB_PACKAGE_SUFFIX=win-x64-msvc *> "$root\build\_logs\pkg-msvc-cfg.txt"
 Say "   configure=$LASTEXITCODE"
 cmake --build build\pkg-msvc --config Release *> "$root\build\_logs\pkg-msvc-build.txt"
@@ -39,7 +43,7 @@ $env:PATH = "D:\ProgramData\gcc-arm-linux-gnueabi\bin;$env:PATH"
 $tc7 = ((Resolve-Path cmake\toolchains\linux-armv7-zynq.cmake).Path -replace '\\', '/')
 cmake -S . -B build\pkg-armv7 -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninja" "-DCMAKE_TOOLCHAIN_FILE=$tc7" `
   -DCMAKE_BUILD_TYPE=Release -DMYLIB_BUILD_EXAMPLES=OFF -DMYLIB_BUILD_TESTS=OFF `
-  -DMYLIB_BUILD_TOOLS=OFF -DMYLIB_ENABLE_CV=ON -DMYLIB_ENABLE_NCNN=ON `
+  -DMYLIB_BUILD_TOOLS=OFF -DMYLIB_ENABLE_CV=ON -DMYLIB_ENABLE_NCNN=OFF `
   -DMYLIB_PACKAGE_SUFFIX=linux-armv7-glibc239 *> "$root\build\_logs\pkg-armv7-cfg.txt"
 Say "   configure=$LASTEXITCODE"
 cmake --build build\pkg-armv7 *> "$root\build\_logs\pkg-armv7-build.txt"

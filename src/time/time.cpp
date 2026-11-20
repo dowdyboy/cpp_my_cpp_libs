@@ -45,9 +45,24 @@ std::int64_t unix_ms() noexcept {
 }
 
 // ----------------------------------------------------------------------------- 格式化
+namespace {
+
+/// 毫秒 → 秒，**向下取整**（C++ 的整数除法向 0 截断，负数会差 1 秒）。
+/// -1500ms 应该是 -2s + 500ms，而不是 -1s + (-500ms)。
+std::int64_t floor_div_1000(std::int64_t ms) noexcept {
+    return (ms >= 0) ? (ms / 1000) : -((-ms + 999) / 1000);
+}
+
+/// 毫秒里"不足一秒"的部分，恒为非负（0..999）。
+int ms_remainder(std::int64_t ms) noexcept {
+    const std::int64_t sec = floor_div_1000(ms);
+    return static_cast<int>(ms - sec * 1000);
+}
+
+}  // namespace
 std::string format_utc(std::int64_t ms, bool with_ms) {
-    const auto seconds = static_cast<std::int64_t>(ms / 1000);
-    const auto millis  = static_cast<int>(ms % 1000);
+    const auto seconds = floor_div_1000(ms);
+    const auto millis  = ms_remainder(ms);
 
     std::tm tmv{};
     const auto secs = static_cast<std::time_t>(seconds);
@@ -59,8 +74,8 @@ std::string format_utc(std::int64_t ms, bool with_ms) {
     std::string out(buf);
     if (with_ms) {
         char frac[8];
-        // ms 可能为负（1970 之前），取绝对值避免 "-0.xxx"
-        std::snprintf(frac, sizeof(frac), ".%03d", millis < 0 ? -millis : millis);
+        // millis 已保证非负（见 floor_div_1000 / ms_remainder）
+        std::snprintf(frac, sizeof(frac), ".%03d", millis);
         out += frac;
     }
     out += "Z";
@@ -69,7 +84,7 @@ std::string format_utc(std::int64_t ms, bool with_ms) {
 
 std::string format_local(std::int64_t ms, const char* fmt) {
     if (fmt == nullptr) return {};
-    const auto seconds = static_cast<std::int64_t>(ms / 1000);
+    const auto seconds = floor_div_1000(ms);
 
     std::tm tmv{};
     const auto secs = static_cast<std::time_t>(seconds);

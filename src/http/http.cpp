@@ -505,15 +505,16 @@ Status Server::listen_async() {
 
     // 上一次的后台线程如果已经自然结束，先回收，否则对 joinable thread 赋值 = terminate
     {
+        // 回收旧线程 + 赋新线程必须在**同一把锁**里：stop() 会在另一个线程读
+        // joinable()/get_id()，锁外赋值就是实打实的数据竞争（TSan 能抓到）。
         std::lock_guard<std::mutex> lock(impl_->thread_mutex);
-        if (impl_->thread.joinable()) impl_->thread.join();
+        if (impl_->thread.joinable()) impl_->thread.join();  // 该线程已结束，join 立即返回
+        impl_->stopped = false;
+        impl_->thread  = std::thread([impl = impl_.get()] {
+            impl->svr.listen_after_bind();
+            impl->running = false;
+        });
     }
-
-    impl_->stopped = false;
-    impl_->thread  = std::thread([impl = impl_.get()] {
-        impl->svr.listen_after_bind();
-        impl->running = false;
-    });
 
     // 等后台线程真正进入 accept 循环（或立刻失败），避免把"启动失败"报成成功
     for (int i = 0; i < 200; ++i) {
@@ -535,9 +536,13 @@ void Server::stop() {
     // 关键判定：handler 上下文（线程池 worker）里绝不能 join 监听线程，
     // 否则就是"worker 等监听线程、监听线程 join 所有 worker"的循环等待（实测死锁）。
     const bool from_handler = in_handler_context();
-    const bool self_thread  = impl_->thread.joinable() &&
-                             impl_->thread.get_id() == std::this_thread::get_id();
-
+    bool       self_thread  = false;
+    {
+        // 读 joinable()/get_id() 同样要拿锁：listen_async 可能在另一个线程赋值。
+        std::lock_guard<std::mutex> lock(impl_->thread_mutex);
+        self_thread = impl_->thread.joinable() &&
+                      impl_->thread.get_id() == std::this_thread::get_id();
+    }
     if (from_handler || self_thread) {
         // detach 路径连互斥锁都用 try_lock：如果另一个线程正拿着锁 join 收尾，
         // 我们在这里**阻塞**就会再次形成同样的环（它等监听线程，监听线程等我们）。

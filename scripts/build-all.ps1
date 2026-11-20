@@ -1,10 +1,10 @@
-<#
+﻿<#
 .SYNOPSIS
     一次性构建/测试 my_cpp_libs 的全部目标平台。
 
 .DESCRIPTION
     依次执行 CMakePresets.json 里的 6 个预设（多一个 linux-armv7-static）：
-        win-msvc / win-mingw / linux-x64 / linux-armv7 / linux-aarch64
+        win-msvc / win-mingw / linux-x64 / linux-armv7 / linux-armv7-static / linux-aarch64
     宿主平台（Windows）的构建会顺带跑单元测试；交叉编译只验证能编过、能链接。
 
 .EXAMPLE

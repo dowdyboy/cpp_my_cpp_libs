@@ -24,6 +24,7 @@ static constexpr int      kShutWr    = SD_SEND;
 #  define MYLIB_INTERRUPTED(e) ((e) == WSAEINTR)
 #  define MYLIB_IN_PROGRESS(e) ((e) == WSAEWOULDBLOCK || (e) == WSAEINPROGRESS)
 #  define MYLIB_TIMED_OUT(e) ((e) == WSAETIMEDOUT)
+#  define MYLIB_EINVAL_VALUE WSAEINVAL
 #else
 #  include <arpa/inet.h>
 #  include <fcntl.h>
@@ -42,6 +43,7 @@ static constexpr int      kShutWr    = SHUT_WR;
 #  define MYLIB_INTERRUPTED(e) ((e) == EINTR)
 #  define MYLIB_IN_PROGRESS(e) ((e) == EINPROGRESS || (e) == EWOULDBLOCK)
 #  define MYLIB_TIMED_OUT(e) ((e) == EAGAIN || (e) == EWOULDBLOCK)
+#  define MYLIB_EINVAL_VALUE EINVAL
 
 // macOS/BSD 没有 MSG_NOSIGNAL（用 SO_NOSIGPIPE）；这里兜底成 0，
 // 并在建立 socket 时统一设 SO_NOSIGPIPE（见下面的 no_sigpipe() 调用）。
@@ -127,8 +129,26 @@ bool set_blocking(native_t fd, bool blocking) {
 #endif
 }
 
+#if !defined(_WIN32)
+namespace {
+
+/// 把错误码写回 errno（只有 POSIX 的 FD_SETSIZE 检查需要它）。
+void set_sock_errno(int err) noexcept { errno = err; }
+
+}  // namespace
+#endif
+
 /// 1 = 就绪，0 = 超时，-1 = 出错。timeout_ms < 0 表示一直等。
 int wait_ready(native_t fd, bool for_write, int timeout_ms) {
+#    if !defined(_WIN32)
+    // POSIX 的 fd 是数组下标：fd >= FD_SETSIZE 时 FD_SET 会**栈越界**，必须挡住。
+    // （Windows 的 fd_set 是"最多 FD_SETSIZE 个 SOCKET"的数组，SOCKET 的数值
+    //   大小与 FD_SETSIZE 无关 —— 在那里照搬这个判断会把所有连接都拒掉。）
+    if (static_cast<std::size_t>(fd) >= static_cast<std::size_t>(FD_SETSIZE)) {
+        set_sock_errno(MYLIB_EINVAL_VALUE);
+        return -1;
+    }
+#    endif
     fd_set set;
     FD_ZERO(&set);
     FD_SET(fd, &set);

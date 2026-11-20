@@ -229,14 +229,47 @@ MYTEST_CASE(serial_default_port_is_closed) {
 }
 
 MYTEST_CASE(serial_move_semantics_keeps_ownership) {
-    ms::Port a;
-    ms::Port b(std::move(a));
-    CHECK(!a.is_open());
-    CHECK(!b.is_open());
-    // 移动赋值给一个已有对象也不能泄漏（这里两者都没打开，主要验不崩）
-    ms::Port c;
-    c = std::move(b);
-    CHECK(!c.is_open());
+    // 先覆盖"空对象移动"这条平凡路径
+    ms::Port empty;
+    ms::Port moved(std::move(empty));
+    CHECK(!empty.is_open());
+    CHECK(!moved.is_open());
+
+#if defined(__unix__) || defined(__APPLE__)
+    // 关键：移动一个**已经打开**的 Port，句柄必须跟着走，而且还能收发。
+    // 以前这条用例全程只用默认构造的 closed Port，移动构造完全不搬 handle_ 也会绿。
+    PtyPair pty;
+    if (!make_pty(pty)) MYTEST_SKIP("本机无法创建 PTY");
+
+    CHECK_OK_VALUE(src, ms::Port::open(pty.slave_path));
+    const std::intptr_t raw = src.native_handle();
+    CHECK(raw >= 0);
+
+    ms::Port dst(std::move(src));
+    CHECK(!src.is_open());                 // 源对象必须放弃句柄
+    CHECK(dst.is_open());
+    CHECK_EQ(dst.native_handle(), raw);    // 句柄真的搬过去了
+    CHECK_EQ(dst.name(), pty.slave_path);
+
+    CHECK(master_write(pty.master, "MOVE"));
+    std::uint8_t buf[8] = {};
+    auto         got    = dst.read_some(buf, sizeof buf, 1000ms);
+    CHECK_OK_VALUE(n, got);
+    CHECK_EQ(std::string(reinterpret_cast<char*>(buf), n), std::string("MOVE"));
+
+    // 移动赋值同样要把句柄接过来
+    ms::Port assignee;
+    assignee = std::move(dst);
+    CHECK(!dst.is_open());
+    CHECK(assignee.is_open());
+    CHECK(master_write(pty.master, "OK"));
+    auto got2 = assignee.read_some(buf, sizeof buf, 1000ms);
+    CHECK_OK_VALUE(n2, got2);
+    CHECK_EQ(std::string(reinterpret_cast<char*>(buf), n2), std::string("OK"));
+    CHECK(assignee.close().ok());
+#else
+    MYTEST_SKIP("Windows 上需要虚拟串口驱动才能验证句柄转移");
+#endif
 }
 
 // =============================================================================

@@ -47,8 +47,19 @@ my::http  —— HTTP 客户端 + 服务端（封装 cpp-httplib）           �
 | 依赖 | 只要 `libpthread/libstdc++/libm/libgcc_s/libc`，不拉 OpenSSL/zlib |
 | Windows 坑 | 必须 `_WIN32_WINNT=0x0A00`（否则直接 `#error`），链接 `ws2_32` |
 
-不选其它库的原因见 [01 §2.1](01-规划与可行性.md) 的网络一节：libcurl 只做客户端且要 TLS
-依赖；civetweb 只有服务端且是 C API；mongoose 是 GPL/商业；libmicrohttpd 是 LGPL。
+为什么不用现成的网络库：
+
+| 库 | 为什么没选 |
+|---|---|
+| libcurl | 只做客户端，而且为了 HTTPS 要拖进 OpenSSL/mbedTLS |
+| civetweb | 只有服务端，还是 C API |
+| mongoose | GPL / 商业双许可，嵌进产品里要谈授权 |
+| libmicrohttpd | LGPL，静态链接有额外义务 |
+
+裸 socket 的跨平台差异就那么几处（WSAStartup / SOCKET vs int / SIGPIPE / 超时 / 广播组播），
+集中在 `src/net/net.cpp` 一个文件里吃掉即可，不需要为此引一个库。
+HTTP 之所以例外引了 cpp-httplib，是因为"正确的 HTTP 报文解析 + chunked + 分块上传"
+不值得自己写（见 §2）。
 
 ## 4. `my::net` 用法
 

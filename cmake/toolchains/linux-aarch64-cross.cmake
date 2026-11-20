@@ -24,6 +24,9 @@ set(CMAKE_SHARED_LINKER_FLAGS_INIT "-no-pie")
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+# 包搜索用 BOTH：SDK 的 cmake 配置一般装在 sysroot 之外（CI 的 package-linux 就是
+# 解包到 /tmp 再用 -DCMAKE_PREFIX_PATH 指过去），设成 ONLY 会让消费方找不到。
+# linux-aarch64.cmake / petalinux-2020.2-zynq.cmake 里也是这个口径。
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
 
 set(MYLIB_TARGET_TRIPLE "aarch64-linux-gnu")

@@ -90,17 +90,22 @@ double correlation(const Samples& a, const Samples& b) {
     return num / std::sqrt(da * db);
 }
 
-/// 比特错误率；BPSK 有 π 相位模糊，允许整体取反（取两者较小）
-double ber(const std::vector<std::uint8_t>& got, const std::vector<std::uint8_t>& want) {
+/// 比特错误率。
+///
+/// `allow_invert` 只给 **BPSK** 用：它有 π 相位模糊，判决可能整体取反，这时算"取反后"较小值
+/// 是合理的。ASK/FSK 没有这个模糊 —— 以前的默认实现把取反也算成正确，于是
+/// "0/1 判反了"这种真 bug 会被 BER=0 掩掉。默认必须是不允许取反。
+double ber(const std::vector<std::uint8_t>& got, const std::vector<std::uint8_t>& want,
+           bool allow_invert = false) {
     const std::size_t n = std::min(got.size(), want.size());
     if (n == 0) return 1.0;
     std::size_t err = 0;
-    std::size_t inv = 0;
     for (std::size_t i = 0; i < n; ++i) {
-        if (got[i] != want[i]) ++err;
-        if (got[i] == want[i]) ++inv;
+        if ((got[i] != 0) != (want[i] != 0)) ++err;
     }
-    return static_cast<double>(std::min(err, inv)) / static_cast<double>(n);
+    double rate = static_cast<double>(err) / static_cast<double>(n);
+    if (allow_invert) rate = std::min(rate, 1.0 - rate);
+    return rate;
 }
 
 std::vector<std::uint8_t> random_bits(std::size_t n, std::uint32_t seed) {
@@ -1113,7 +1118,7 @@ MYTEST_CASE(dsp_demod_bpsk_bits_with_cfo) {
 
     CHECK_OK_VALUE(got, my::dsp::demod_bpsk(x, fs, rs));
     CHECK(got.size() >= bits.size() - 2);
-    CHECK(ber(got, bits) < 0.02);
+    CHECK(ber(got, bits, /*allow_invert=*/true) < 0.02);
 }
 
 // 回归：sps 远大于样本数时，BPSK 的定时搜索会把 offset 推到信号长度之外。

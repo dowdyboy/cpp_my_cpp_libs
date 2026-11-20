@@ -1,5 +1,7 @@
 #include "my_cpp_libs/io/io.hpp"
 
+#include "my_cpp_libs/core/path_utf8.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -21,43 +23,10 @@
 namespace fs = std::filesystem;
 
 namespace my::io {
+
+using my::core::from_path;
+using my::core::to_path;
 namespace {
-
-/// UTF-8 → 文件系统路径。
-///
-/// Windows 上 `fs::path(std::string)` 走的是**当前 ANSI 代码页**，中文/日文路径会直接坏掉
-/// （0.1.7 之前头文件声称"内部转宽字符"，其实并没有）。这里显式按 UTF-8 解成 UTF-16。
-/// Linux 上 std::string 本身就是字节序列，原样用。
-fs::path to_path(std::string_view s) {
-#if defined(_WIN32)
-    if (s.empty()) return fs::path();
-    const int wlen = ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
-                                           nullptr, 0);
-    if (wlen <= 0) return fs::path(std::string(s));  // 不是合法 UTF-8：退回原样，至少不崩
-    std::wstring w(static_cast<std::size_t>(wlen), L'\0');
-    ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), wlen);
-    return fs::path(w);
-#else
-    return fs::path(std::string(s));
-#endif
-}
-
-/// 文件系统路径 → UTF-8。与 to_path 对称：否则 list_dir 返回的中文路径会是乱码。
-std::string from_path(const fs::path& p) {
-#if defined(_WIN32)
-    const std::wstring w = p.native();
-    if (w.empty()) return std::string();
-    const int n = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr,
-                                        0, nullptr, nullptr);
-    if (n <= 0) return std::string();
-    std::string s(static_cast<std::size_t>(n), '\0');
-    ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), n, nullptr,
-                          nullptr);
-    return s;
-#else
-    return p.string();
-#endif
-}
 
 Status from_ec(const std::error_code& ec, const char* what, std::string_view path) {
     if (!ec) return Ok();
@@ -99,7 +68,7 @@ bool is_directory(std::string_view path) noexcept {
 }
 
 Result<FileInfo> info(std::string_view path) {
-    const fs::path p{std::string(path)};
+    const fs::path p = to_path(path);
     std::error_code ec;
     if (!fs::exists(p, ec)) {
         return Status(Errc::NotFound, "路径不存在: " + std::string(path));
@@ -119,7 +88,14 @@ Result<std::vector<std::string>> list_dir(std::string_view path) {
         return Status(Errc::NotFound, "目录不存在: " + std::string(path));
     }
     std::vector<std::string> names;
-    for (fs::directory_iterator it(to_path(path), ec), end; it != end; it.increment(ec)) {
+    fs::directory_iterator it(to_path(path), ec);
+    // 构造失败（没读权限等）时 it == end，循环体一次都不进 —— 必须在这里就报错，
+    // 否则"读不了"会被当成"空目录"返回 Ok。
+    if (ec) {
+        return Status(Errc::IoError,
+                      "遍历目录失败: " + std::string(path) + "（" + ec.message() + "）");
+    }
+    for (fs::directory_iterator end; it != end; it.increment(ec)) {
         if (ec) return Status(Errc::IoError, "遍历目录失败: " + std::string(path) + "（" + ec.message() + "）");
         names.push_back(from_path(it->path().filename()));
     }
@@ -282,11 +258,22 @@ Result<TempFile> TempFile::create(std::string_view dir, std::string_view prefix,
     for (int attempt = 0; attempt < 16; ++attempt) {
         const std::string name = std::string(prefix) + temp_suffix() + std::string(ext);
         const std::string path = join(base, name);
-        std::error_code   ec;
-        if (fs::exists(to_path(path), ec)) continue;  // 撞名，换一个
-        // 真的建出来占位：否则两个进程可能拿到同一个名字
-        std::ofstream f(to_path(path), std::ios::binary);
-        if (!f) return Status(Errc::IoError, "无法创建临时文件: " + path);
+        // "x" 模式是**独占创建**：两个进程同目录同前缀、恰好落在同一毫秒时，
+        // 先建的赢，另一个创建失败并换名字重试。
+        // 以前是 exists() 检查 + 普通创建，那是有竞态的（temp_suffix 的计数器只在进程内唯一）。
+        std::FILE* probe = nullptr;
+#    if defined(_WIN32)
+        {
+            // Windows 上必须走宽字符版，否则又回 ANSI 代码页
+            const fs::path p = to_path(path);
+            const std::wstring w = p.native();
+            probe = ::_wfopen(w.c_str(), L"wbx");
+        }
+#    else
+        probe = std::fopen(path.c_str(), "wbx");
+#    endif
+        if (probe == nullptr) continue;  // 撞名：换一个名字
+        std::fclose(probe);
         out.path_ = path;
         return out;
     }

@@ -156,7 +156,7 @@ endif()
 set(CPACK_PACKAGE_NAME            "my_cpp_libs")
 set(CPACK_PACKAGE_VENDOR          "dowdyboy")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
-    "跨平台 C++17 三方库统一封装层（core/log/io/time/thread/json/math/infer/image/dsp/ml/net/http/cv）")
+    "跨平台 C++17 三方库统一封装层（core/io/time/thread/log/json/math/infer/preprocess/image/dsp/ml/net/serial/http/cv）")
 set(CPACK_PACKAGE_VERSION         "${PROJECT_VERSION}")
 set(CPACK_PACKAGE_FILE_NAME       "my_cpp_libs-${PROJECT_VERSION}-${MYLIB_PACKAGE_SUFFIX}")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "my_cpp_libs-${PROJECT_VERSION}")

@@ -174,11 +174,26 @@ MYTEST_CASE(log_async_roundtrip) {
     cfg.async            = true;
     cfg.async_queue_size = 256;
 
+    std::filesystem::remove(cfg.file_path, ec);  // 上次跑剩的清掉，否则下面数不准
+
     CHECK_OK(my::log::init(cfg));
     for (int i = 0; i < 100; ++i) my::log::write(my::log::Level::Info, "async 一行");
     my::log::flush();
     my::log::shutdown();
     CHECK(!my::log::is_initialized());
+
+    // 关键：**回读文件**。以前这里只断言 is_initialized()==false，
+    // 异步队列丢光/重复/截断都会绿 —— 那等于没测。
+    std::ifstream in(cfg.file_path, std::ios::binary);
+    CHECK(static_cast<bool>(in));
+    std::size_t lines  = 0;
+    std::string line;
+    std::size_t hits   = 0;
+    while (std::getline(in, line)) {
+        ++lines;
+        if (line.find("async 一行") != std::string::npos) ++hits;
+    }
+    CHECK_EQ(hits, std::size_t{100});   // 一条不多、一条不少
 }
 
 // 本库的 init/shutdown 只管理自己创建的 logger：

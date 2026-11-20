@@ -25,3 +25,12 @@ target_link_libraries(sdk_consumer PRIVATE
     my_cpp_libs::dsp
     my_cpp_libs::net
     my_cpp_libs::serial)
+
+# ---------------------------------------------------------------------------
+#  只链单个组件的消费方：抓"组件在 SDK 里没带 core"和"实现引用了包里没有的库"
+#  这两类链接缺陷。**故意**不链 ::all（::all 里有 core，会把问题盖住）。
+add_executable(sdk_consumer_min min.cpp)
+target_link_libraries(sdk_consumer_min PRIVATE
+    my_cpp_libs::http
+    my_cpp_libs::infer
+    my_cpp_libs::serial)

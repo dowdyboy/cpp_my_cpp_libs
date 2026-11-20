@@ -1,4 +1,5 @@
 #include "my_cpp_libs/json/json.hpp"
+#include "my_cpp_libs/core/path_utf8.hpp"
 
 #include "my_cpp_libs/json/config.hpp"  // merge_into / document_from_env / Layered
 
@@ -36,7 +37,7 @@ const char* type_name(Type type) noexcept {
 }
 
 Result<Document> Document::parse_file(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
+    std::ifstream in(core::to_path(path), std::ios::binary);
     if (!in) {
         return Status(Errc::IoError, "无法打开 JSON 文件: " + path);
     }
@@ -53,7 +54,7 @@ Result<Document> Document::parse_file(const std::string& path) {
 }
 
 Status Document::save_file(const std::string& path, int indent) const {
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    std::ofstream out(core::to_path(path), std::ios::binary | std::ios::trunc);
     if (!out) {
         return Status(Errc::IoError, "无法写入 JSON 文件: " + path);
     }
@@ -281,7 +282,7 @@ Status document_from_argv(int argc, const char* const* argv, Document& out, int 
 }
 
 bool Layered::io_exists(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
+    std::ifstream in(core::to_path(path), std::ios::binary);
     return static_cast<bool>(in);
 }
 

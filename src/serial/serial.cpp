@@ -471,21 +471,29 @@ Result<std::size_t> Port::read_some(void* buf, std::size_t n, std::chrono::milli
 
 #if defined(_WIN32)
     HANDLE h = from_handle(handle_);
+    const int ms = to_poll_ms(timeout);   // < 0 表示无限等待
+    // ReadIntervalTimeout = MAXDWORD + TotalTimeoutConstant = t：
+    // ReadFile 立刻返回已缓冲的数据，否则最多等 t 毫秒。
+    // timeout < 0 时用 50 ms 分片循环模拟"无限等待"：这个句柄不是 overlapped 的，
+    // 没法用 WaitCommEvent 阻塞等；如果照搬 t=0，会变成"立刻返回 0"，
+    // 与 POSIX 那边 poll(-1) 的语义不一致，按"阻塞到有数据"写循环的调用方会空转。
+    const DWORD slice = (ms < 0) ? 50u : static_cast<DWORD>(ms);
     COMMTIMEOUTS to{};
-    // ReadIntervalTimeout = MAXDWORD + TotalTimeoutConstant = ms：
-    // ReadFile 立刻返回已缓冲的数据，否则最多等 ms。
     to.ReadIntervalTimeout         = MAXDWORD;
     to.ReadTotalTimeoutMultiplier  = 0;
-    to.ReadTotalTimeoutConstant    = static_cast<DWORD>(to_poll_ms(timeout) < 0 ? 0 : to_poll_ms(timeout));
+    to.ReadTotalTimeoutConstant    = slice;
     to.WriteTotalTimeoutMultiplier = 0;
     to.WriteTotalTimeoutConstant   = 0;
     if (!::SetCommTimeouts(h, &to)) return io_status("SetCommTimeouts", name_);
 
-    DWORD got = 0;
-    if (!::ReadFile(h, buf, static_cast<DWORD>(n), &got, nullptr)) {
-        return io_status("ReadFile", name_);
+    for (;;) {
+        DWORD got = 0;
+        if (!::ReadFile(h, buf, static_cast<DWORD>(n), &got, nullptr)) {
+            return io_status("ReadFile", name_);
+        }
+        if (got != 0 || ms >= 0) return static_cast<std::size_t>(got);
+        // 无限等待且这一片没数据：继续等
     }
-    return static_cast<std::size_t>(got);
 #else
     const int fd = from_handle(handle_);
     const int ms = to_poll_ms(timeout);

@@ -1,4 +1,5 @@
 #include "my_cpp_libs/core/hash.hpp"
+#include "my_cpp_libs/core/path_utf8.hpp"
 #include "my_cpp_libs/ml/ml.hpp"
 
 #include <algorithm>
@@ -23,7 +24,7 @@ std::string sibling_json(const std::string& onnx_path) {
 }
 
 bool file_exists(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(my::core::to_path(path), std::ios::binary);
     return static_cast<bool>(f);
 }
 

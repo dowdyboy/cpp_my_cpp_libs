@@ -30,7 +30,7 @@
 
 | 包 | 平台/工具链 | 内含 |
 |---|---|---|
-| `my_cpp_libs-0.1.7-win-x64-msvc.zip` | Windows x64 / MSVC 19.5x | ORT 1.23.2 + ncnn + OpenCV 4.12（DLL 在 `bin/`） |
+| `my_cpp_libs-0.1.7-win-x64-msvc.zip` | Windows x64 / MSVC 19.5x | ORT 1.23.2 + OpenCV 4.12（DLL 在 `bin/`）；**不含 ncnn** |
 | `my_cpp_libs-0.1.7-win-x64-mingw-basic.zip` | Windows x64 / MinGW GCC 15.2 | **基础包**：无 ORT/OpenCV（ABI 不兼容，见 Deps.cmake） |
 | `my_cpp_libs-0.1.7-linux-armv7-glibc239.tar.gz` | armv7-A 硬浮点（2024 SDK，**glibc ≥ 2.38**） | ORT 1.18.1 + OpenCV 4.12 |
 | `my_cpp_libs-0.1.7-linux-aarch64.tar.gz` | Pi 4B / 通用 aarch64（ARM GNU 14.2，glibc ≈ 2.40） | ORT 1.19.2 + OpenCV 4.12 |
@@ -61,7 +61,7 @@ CI 里也有两个 `package-*` job（`package-linux` / `package-windows`）跑�
 
 | 包名 | 来源 | 内含 |
 |---|---|---|
-| `win-x64-msvc` | 本机 `package-all.ps1` | ORT + OpenCV + ncnn |
+| `win-x64-msvc` | 本机 `package-all.ps1` | ORT + OpenCV（不含 ncnn，见下） |
 | `win-x64-msvc-ort` | CI `package-windows` | ORT，无 OpenCV/ncnn |
 | `linux-*-glibcNNN` | 本机 | ORT + OpenCV |
 | `linux-*-glibcNNN-basic` | CI `package-linux` | 无 ORT/OpenCV（交叉预编译包不进 CI 依赖） |

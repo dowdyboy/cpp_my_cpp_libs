@@ -17,7 +17,7 @@
 | pocketfft | git 4d865cb | BSD-3-Clause | 编进 `libmy_cpp_libs_dsp` | `sources/pocketfft_hdronly.h`（声明在文件头） |
 | ONNX Runtime | 1.23.2（x64）/ 1.18.1（armv7）/ 1.19.2（aarch64） | Apache-2.0 | 动态库（`lib/` 或 `bin/`）+ 导入库 | `onnxruntime-LICENSE`（+ `onnxruntime-ThirdPartyNotices.txt`） |
 | OpenCV | 4.12.0 | Apache-2.0 | 动态库（`lib/` 或 `bin/`）+ 头文件 | `opencv-LICENSE` |
-| ncnn（仅部分包） | 20250503 | BSD-3-Clause | 静态库 | `ncnn-LICENSE.txt` |
+| ncnn（**不随包分发**） | 20250503 | BSD-3-Clause | 源码构建时才用；许可证原文仍随包附带 | `ncnn-LICENSE.txt` |
 
 > 上表里没出现的库（例如本包没有启用 `cv` 时不会有 OpenCV）对应文件也不在包里。
 

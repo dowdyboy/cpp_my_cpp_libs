@@ -15,7 +15,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(my_cpp_libs
-    VERSION 0.1.7
+    VERSION 0.1.8
     DESCRIPTION "Unified cross-platform C++ wrapper over third-party open-source libraries"
     LANGUAGES CXX)
 
@@ -296,7 +296,12 @@ if(MYLIB_INSTALL)
     set(MYLIB_SDK_OCV_LIBS "${_sdk_ocv_libs}")
     set(MYLIB_SDK_OCV_DLL "${_sdk_ocv_dll}")
 
-    # 每个组件在 SDK 里要额外链接什么（对应 src/CMakeLists 里的 PUBLIC 依赖）
+    # 每个组件在 SDK 里要**额外**链接什么（对应 src/CMakeLists 里的 PUBLIC 依赖）。
+    #
+    # 注意：src/CMakeLists.txt 里每个组件都 PUBLIC 链 mylib_core（Status/Result 的实现
+    # 就在 core），所以下面的循环里会给除 core 之外的每个组件自动补上 my_cpp_libs::core。
+    # 0.1.7 之前这张表漏了 core，结果"只链 my_cpp_libs::http"的消费方链接失败
+    # （http 自己调了 Status::to_string）—— 只有 sdk_consumer 链的是 ::all 才没暴露。
     set(_mylib_sdk_link_core       "")
     set(_mylib_sdk_link_log        "my_cpp_libs::deps_spdlog")
     set(_mylib_sdk_link_io         "")
@@ -305,7 +310,7 @@ if(MYLIB_INSTALL)
     set(_mylib_sdk_link_json       "my_cpp_libs::deps_nlohmann")
     set(_mylib_sdk_link_math       "my_cpp_libs::deps_eigen")
     set(_mylib_sdk_link_dsp        "")
-    set(_mylib_sdk_link_preprocess "my_cpp_libs::core")
+    set(_mylib_sdk_link_preprocess "")   # 循环里已经统一补 core，这里别重复
     set(_mylib_sdk_link_net        "")
     set(_mylib_sdk_link_serial     "")
     set(_mylib_sdk_link_http       "my_cpp_libs::json")
@@ -326,8 +331,16 @@ if(MYLIB_INSTALL)
     unset(_sdk_components_code)
     foreach(_c core io time thread log json math infer preprocess image dsp ml net serial http cv)
         if(TARGET mylib_${_c})
+            if(_c STREQUAL "core")
+                set(_sdk_links "")
+            else()
+                set(_sdk_links "my_cpp_libs::core")
+                if(_mylib_sdk_link_${_c})
+                    string(APPEND _sdk_links ";${_mylib_sdk_link_${_c}}")
+                endif()
+            endif()
             string(APPEND _sdk_components_code
-                "_mylib_sdk_add_component(${_c} \"${_mylib_sdk_link_${_c}}\")\n")
+                "_mylib_sdk_add_component(${_c} \"${_sdk_links}\")\n")
         endif()
     endforeach()
     set(MYLIB_SDK_COMPONENTS_BLOCK "${_sdk_components_code}")

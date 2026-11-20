@@ -22,7 +22,7 @@ configure_file(
     "${CMAKE_CURRENT_BINARY_DIR}/generated/my_cpp_libs/build_info_config.h"
     @ONLY)
 
-set(_core_sources core/status.cpp core/build_info.cpp core/hash.cpp)
+set(_core_sources core/status.cpp core/build_info.cpp core/hash.cpp core/path_utf8.cpp)
 mylib_add_component(core SOURCES ${_core_sources})
 target_include_directories(mylib_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 list(APPEND MYLIB_TARGETS mylib_core)

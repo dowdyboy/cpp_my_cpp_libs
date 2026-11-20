@@ -110,9 +110,17 @@ MYTEST_CASE(time_scoped_timer_swallows_callback_exception) {
     if (!my::BuildInfo::hasExceptions()) {
         MYTEST_SKIP("-fno-exceptions 构建：析构里没有 try/catch，回调不允许抛");
     }
+    double recorded = -1.0;
     {
-        my::time::ScopedTimer timer([](double) { throw 42; });
-        my::time::sleep_ms(1);
+        my::time::ScopedTimer timer([&recorded](double seconds) {
+            recorded = seconds;   // 先记录，再抛
+            throw 42;
+        });
+        my::time::sleep_ms(5);
     }
-    CHECK(true);  // 能走到这里就说明没 terminate
+    // 走到这里说明异常没从析构里逃出去（否则进程已经 terminate）；
+    // 同时断言回调**确实被调用**且拿到了正的耗时 —— 只写 CHECK(true) 的话，
+    // "析构根本不调回调"也会通过。
+    CHECK(recorded >= 0.0);
+    CHECK(recorded >= 0.003);
 }

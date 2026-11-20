@@ -242,7 +242,7 @@ endif()
 
 | 阶段 | 内容 | 前置条件 | 状态 |
 |---|---|---|---|
-| **C0** | 纯数组预处理/后处理（§5） | 无 | ✅ **已完成**（`infer/preprocess.hpp`，22 个测试） |
+| **C0** | 纯数组预处理/后处理（§5） | 无 | ✅ **已完成**（`infer/preprocess.hpp`，25 个测试） |
 | **C1** | Windows 接官方预编译 OpenCV，跑通 `prepare()` | 下载 opencv-4.x-windows.exe | ✅ **已完成**（见 §8 实测） |
 | **C2** | Linux x86 接入（apt 或自编） | WSL 可用 | ✅ 已完成（armv7 交叉编译一并在 §3 完成） |
 | **C3** | Zynq 交叉编译 OpenCV（裁剪版） | PetaLinux SDK | ✅ **已完成**（2026-11-15，3 个 .so 共 5.9 MB，板端 8/8 通过） |

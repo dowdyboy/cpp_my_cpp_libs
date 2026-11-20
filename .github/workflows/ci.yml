@@ -114,7 +114,7 @@ jobs:
 
   # ---------------------------------------------------------------- 最小配置（组件裁剪矩阵）
   linux-minimal:
-    name: Linux / 最小配置（只留 core+log）
+    name: Linux / 最小配置（关 json/math/infer）
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -392,7 +392,11 @@ jobs:
             -DCMAKE_PREFIX_PATH="$PWD/sdk"
           cmake --build build/consumer
       - name: 运行外部工程（真实链接 + 真实跑）
-        run: ./build/consumer/sdk_consumer
+        run: |
+          set -e
+          ./build/consumer/sdk_consumer
+          # 只链单个组件的消费方：抓"组件没带 core / 实现引用了包里没有的库"这类链接缺陷
+          ./build/consumer/sdk_consumer_min
 
   # ---------------------------------------------------------------- TSan（数据竞争）
   # log 的全局状态、infer 的后端注册表、http 的线程管理都是"并发写在文档里、
@@ -668,6 +672,9 @@ jobs:
           $exe = Get-ChildItem build\consumer -Recurse -Filter sdk_consumer.exe | Select-Object -First 1
           & $exe.FullName
           if ($LASTEXITCODE -ne 0) { throw "消费方运行失败" }
+          $min = Get-ChildItem build\consumer -Recurse -Filter sdk_consumer_min.exe | Select-Object -First 1
+          & $min.FullName
+          if ($LASTEXITCODE -ne 0) { throw "单组件消费方运行失败（SDK 的组件链接表可能缺依赖）" }
       - uses: actions/upload-artifact@v4
         with:
           name: sdk-win-x64-ort

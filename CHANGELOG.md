@@ -1,5 +1,84 @@
 # 变更记录
 
+## 0.1.8（2026-11-20）—— 第二轮巡检：修掉 SDK 链接缺陷与一整类 UTF-8 路径问题
+
+四个维度（代码 / 测试 / 文档 / 构建）并行审计，本轮修掉其中最要紧的部分。
+
+### 1. 【发布级】SDK 包的两个链接缺陷（0.1.3~0.1.7 的包都受影响）
+
+| 缺陷 | 现象 | 根因 |
+|---|---|---|
+| 包里带 ncnn 符号却没有 ncnn | 消费方链 `my_cpp_libs::infer` **必然 undefined** | 本机打包用 `-DMYLIB_ENABLE_NCNN=ON`，但 ncnn 的静态库（及其 openmp/vulkan 传递依赖）没进包 |
+| 组件没有带上 core | 只链单个组件（如 `my_cpp_libs::http`）链接失败 | Config 的组件链接表手写，`io/time/thread/dsp/net/serial/http` 全是空串，遗漏了"每个组件都 PUBLIC 依赖 core" |
+
+修法：
+- 打包脚本改为 `-DMYLIB_ENABLE_NCNN=OFF`，并**如实**说明"SDK 包不含 ncnn；要用请从源码构建"；
+- SDK 的组件链接表改成**循环里自动补 `my_cpp_libs::core`**（core 自己除外），不再靠人记；
+- 新增 `tests/sdk_consumer/min.cpp`（`sdk_consumer_min`）：**故意只链 http/infer/serial 三个组件**，
+  并纳入 `linux-sdk-consumer` 与两个打包 job 的验收 —— 这两类缺陷以前能溜过去，正是因为
+  `sdk_consumer` 链的是 `::all`（里面显式列了 core）。
+
+> 顺带修正：`docs/THIRD_PARTY_NOTICES.md` 与 README 里"ncnn 以静态库随包分发"的说法。
+
+### 2. 【真 bug】UTF-8 路径：把一处私有修复升成公共设施
+
+0.1.7 只在 `io.cpp` 内部做了 UTF-8→UTF-16，于是 `io::info()`（用的是花括号初始化，漏改）、
+`core::sha256_file_hex`（`fopen(path.c_str())`）、`ml` 的 sidecar 读取、`json` 的文件读写
+全都还在按 Windows 的 ANSI 代码页解释路径 —— **中文/日文路径下这些功能不可用**。
+
+- 新增 `include/my_cpp_libs/core/path_utf8.hpp` + `src/core/path_utf8.cpp`：`my::core::to_path/from_path`；
+- io / hash / ml / json 统一走它（io.cpp 里重复的那份删掉）；
+- `sha256_file_hex` 从 `fopen` 改成 `ifstream(to_path(...))`；
+- 用例 `io_utf8_path_roundtrip` 已覆盖写入/读取/列目录/路径拆分，`io::info()` 这次一并纳入。
+
+### 3. 其它并发/边界修复
+
+| 位置 | 问题 | 修法 |
+|---|---|---|
+| `http::Server::stop/listen_async` | `impl_->thread` 在锁外赋值、锁外读 `joinable()/get_id()` → 数据竞争（可能 join/detach 到正在被改写的 thread） | 赋值与读取都挪进 `thread_mutex` |
+| `net::wait_ready` | `FD_SET` 前不检查 `FD_SETSIZE`：POSIX 上 fd ≥ 1024 会**栈越界** | POSIX 侧加检查并返回 `EINVAL`；Windows 侧不加（SOCKET 是句柄值，与 FD_SETSIZE 无关，加了会把所有连接拒掉——第一版就这么写错了，被测试当场抓住） |
+| `serial::read_some` | Windows 上 `timeout < 0` 被折算成 0，立刻返回；POSIX 是 `poll(-1)` 无限等 —— 同一份代码两种语义 | Windows 用 50 ms 分片循环模拟无限等待（句柄非 overlapped，没法用 `WaitCommEvent`） |
+| `time::format_utc/local` | 负数毫秒的秒数用截断除法，`-1500ms` 差 1 秒 | 改为向下取整（`floor_div_1000` + 非负余数） |
+| `io::list_dir` | `directory_iterator` 构造失败（无读权限）时 `ec` 已置位但循环不执行 → 返回 `Ok` + 空表 | 构造后立刻检查 `ec` |
+| `io::TempFile::create` | `exists()` 检查 + 普通创建有竞态，两进程同毫秒会拿到同一个名字 | 改 `fopen`/`_wfopen` 的 `"x"` 独占创建 |
+
+### 4. 测试有效性（"假绿"比缺用例更危险）
+
+| 用例 | 问题 | 现在断言什么 |
+|---|---|---|
+| `ber()`（test_dsp） | 默认取 `min(err, inv)`，ASK/FSK 的 0/1 判反也会 BER=0 | 新增 `allow_invert` 参数，**只有 BPSK**（π 相位模糊）允许取反 |
+| `serial_move_semantics` | 全程只用 closed Port，移动构造不搬句柄也能过 | 移动一个**已打开**的 PTY 端口，验证句柄转移 + 移动后仍能收发 |
+| `log_async_roundtrip` | 只断言 `is_initialized()==false`，队列丢光也能过 | 回读日志文件，断言恰好 100 行含目标内容 |
+| `time_scoped_timer_swallows_callback_exception` | 只有 `CHECK(true)` | 断言回调**确实被调用**且耗时 > 0 |
+| `ml_gbdt_matches_golden` | 分数循环不检查长度相等 | 先断言 `scores.size()` 一致 |
+
+### 5. 文档（12 处）
+
+失效示例 `MYLIB_CHECK`（库里没这个宏，6 处 → 真实 C++17 if-init）、流式能力表仍标 ❌、
+`mixer.value()->process` 写法不成立、noex 子集口径（docs/01、02、03、07、08）、
+多处过时用例数与包名、以及一个指向不存在内容的交叉引用。
+
+### 6. 验证
+
+| 配置 | 结果 |
+|---|---|
+| MinGW x64 Release | **302/302**（300 用例 + 2 守卫），零告警 |
+| Linux（WSL）Release | **300/300**，9 skip（ml 无 ORT） |
+| `-fno-exceptions` 子集 | **162/162** |
+| SDK 消费方 | `sdk_consumer` + **`sdk_consumer_min`**（单组件链接）均通过 |
+| 中文路径 | `io_utf8_path_roundtrip` 覆盖 write/read/list_dir/info |
+
+### 7. 已知缺口（本轮没做，留给下一轮）
+
+- `cv` 组件（8 用例）没有任何 CI job 打开它（CI 拿不到 OpenCV）；
+- ml 的 9 条用例在干净 CI 上全部 skip（fetch-deps 默认不下 ORT）；
+- HTTP 的 PUT/DELETE/OPTIONS 路由、静态目录挂载、8 MB 超限 413 路径无覆盖；
+- `image::save` 只测 PNG（JPEG/BMP/TGA 与 `quality` 未测）；
+- 零覆盖公开 API：`ThreadPool::shutdown(false)`、`io::copy_file(overwrite=false)`、
+  `time::sleep_s`、`json::type_name`、`math::median_inplace`、`net::UdpSocket::leave_multicast`、
+  `io::TempFile::append/reset`；
+- `thread_pool_runs_concurrently` 只断言"都跑了"，没有观测并发度。
+
 ## 0.1.7（2026-11-20）—— SHA-256 + io 的 UTF-8 路径修复
 
 ### 1. `my::hash`：SHA-256（`core` 组件里，无三方依赖）

@@ -175,7 +175,9 @@ MYTEST_CASE(ml_gbdt_matches_golden) {
         auto r = m.predict_one(g.features);
         CHECK_RESULT(r);
         CHECK_EQ(r.value().label, g.label);
-        for (std::size_t k = 0; k < g.scores.size() && k < r.value().scores.size(); ++k) {
+        // 长度必须一致：否则"少返回几个分数"会被 for 的条件悄悄放过
+    CHECK_EQ(r.value().scores.size(), g.scores.size());
+    for (std::size_t k = 0; k < g.scores.size() && k < r.value().scores.size(); ++k) {
             CHECK_NEAR(r.value().scores[k], g.scores[k], 2e-4);
         }
     }

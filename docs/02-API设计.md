@@ -732,7 +732,7 @@ endif()
 | 把 stb/相机给的 RGB 当 BGR 喂进 `image_to_tensor` | 图看着正常，模型结果全错 | `my::image` 的默认 `src_order` 已经是 RGB；用 `cv::Mat` 时才需要 BGR |
 | 给灰度模型走 `my::cv` 却不设 `input_channels` | 3 通道数据喂 1 通道模型，维度对不上或结果错 | `spec.input_channels = 1`（cv）/ `spec.dst_channels = 1`（image） |
 | 用 `stb` 解出来的图做大幅缩略图 | 双线性点采样没有面积平均，混叠明显 | 大倍下采样换 `stbir_resize_uint8_srgb`，见 [07 §3.3](07-图像链路与无异常构建.md) |
-| 以为 `-fno-exceptions` 整库都支持 | 开了 json/infer 就编不过 | 只有 core + math + dsp + net 支持；CMake 会在 configure 阶段拦下（[07 §5](07-图像链路与无异常构建.md)） |
+| 以为 `-fno-exceptions` 整库都支持 | 开了 json/infer 就编不过 | 只有 core + math + dsp + net + io + time + serial 支持；CMake 会在 configure 阶段拦下（[07 §5](07-图像链路与无异常构建.md)） |
 | sklearn 导出忘了 `zipmap=False` | 分类器输出变成 `seq<map>`，C++ 的 Tensor 吃不了 | `tools/sklearn_export.py` 已固定关闭；直接用 skl2onnx 时自己加 |
 | 特征顺序和训练时不一致 | 不报错，只是结果全错 | 用 sidecar 的 `features` 对齐；`my::ml` 只校验**数量**，顺序要靠元数据 |
 | ONNX opset 导高了 | 板端 ORT 1.18.1 加载失败 | 导出固定 `target_opset=18` |
