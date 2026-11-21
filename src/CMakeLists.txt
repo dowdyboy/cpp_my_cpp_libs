@@ -26,12 +26,9 @@ set(_core_sources core/status.cpp core/build_info.cpp core/hash.cpp core/path_ut
                   core/crash.cpp)
 mylib_add_component(core SOURCES ${_core_sources})
 target_include_directories(mylib_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
-# 崩溃捕获：Windows 用 DbgHelp 的 API（不符号化也要链接），POSIX 的 backtrace 在 libc/dl。
-if(WIN32)
-    target_link_libraries(mylib_core PUBLIC dbghelp)
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_link_libraries(mylib_core PUBLIC ${CMAKE_DL_LIBS})
-endif()
+# crash.cpp 只用 CaptureStackBackTrace（kernel32，默认已链）与 execinfo 的 backtrace
+# （glibc 自带），不需要额外链接 dbghelp/dl；这样 core 仍保持"零三方依赖"，
+# SDK 的 Config 也不用给消费方补平台库。
 list(APPEND MYLIB_TARGETS mylib_core)
 
 # ---------------------------------------------------------------- io

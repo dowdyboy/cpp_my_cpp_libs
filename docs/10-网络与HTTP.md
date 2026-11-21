@@ -202,7 +202,7 @@ ctest --preset win-mingw -R "net_|http_" --output-on-failure
 
 ---
 
-## 9. `my::net::TcpServer`（0.1.10 / Tier 1）
+## 9. `my::net::TcpServer`（Tier 1，未发布）
 
 板端每个 TCP 服务都要手抄一段骨架：
 
@@ -246,7 +246,7 @@ server.value().stop();   // 幂等；join accept 线程 + 最多等 5s 让在途
 |---|---|
 | 线程模型 | 1 个 accept 线程 + **每连接 1 个 detached 线程**；线程只持 `shared_ptr<Impl>`，对象先析构、线程后退出也安全 |
 | 连接上限 | `active >= max_connections` 时直接关闭并计入 `rejected_total()`；`max_connections==0` → `create()` 返回 `InvalidArgument` |
-| 空闲超时 | 连接建立时 `set_timeout(idle_timeout_ms)`；handler 的 `recv/read_line` 超时拿到 `Errce::Timeout`。0 = 阻塞（此时 `stop()` 可能等满 5s） |
+| 空闲超时 | 连接建立时 `set_timeout(idle_timeout_ms)`；handler 的 `recv/read_line` 超时拿到 `Errc::Timeout`。0 = 阻塞（此时 `stop()` 可能等满 5s） |
 | 停止 | `stop()`：置停止标志 → 关 listener（accept 用超时轮询，不跨线程 close）→ join accept 线程 → `active==0` 或 5s |
 | 启动/重启 | `start()` 两次第二次返回 `Busy`；`stop()` 后可在同端口重新 `start()`（端口被抢则 `IoError`） |
 | handler 异常 | 被吞掉并计入 `handler_errors()`，连接照常关闭 |

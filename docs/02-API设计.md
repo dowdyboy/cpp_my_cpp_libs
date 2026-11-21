@@ -68,11 +68,27 @@ auto m = r.map([](int x) { return x * 2; });   // 失败会原样传递
 
 ```cpp
 my::BuildInfo::summary();
-// "my_cpp_libs 0.1.0 | arm-linux-gnueabihf | gcc 13.3.0 | Release | cross | @33817a257a73 | ptr=32"
+// "my_cpp_libs 0.1.9 | arm-linux-gnueabihf | gcc 13.3.0 | Release | cross | @33817a257a73 | ptr=32"
 my::BuildInfo::gitCommit();   // "33817a257a73"（工作区有未提交改动时带 "-dirty"）
 ```
 
 上板第一件事就该打这一行——确认跑的是**哪一次提交**的产物，而不只是版本号。
+
+### codec / crash（core 里的两个工具）
+
+```cpp
+#include <my_cpp_libs/core/codec.hpp>   // header-only：CRC / hex / base64 / COBS
+#include <my_cpp_libs/core/crash.hpp>   // 崩溃现场捕获（install/uninstall）
+
+const std::uint16_t crc = my::codec::crc16_ccitt(payload.data(), payload.size());
+auto frame = my::codec::cobs_encode(payload.data(), payload.size());  // 含末尾 0x00
+
+my::crash::install();   // 进程启动早期一次；崩溃时往 stderr 打 BuildInfo+信号+栈
+```
+
+`codec` 的 CRC 变体参数、COBS 帧格式与 `*_into` 零分配接口见
+[14-协议编解码与崩溃捕获](14-协议编解码与崩溃捕获.md) §1；`crash` 的能力边界
+（best-effort、不替代 core dump、符号化方式）见同一文档 §2。
 
 ---
 
@@ -680,6 +696,27 @@ auto d = rx.value().recv_from();
 | SIGPIPE | Linux 上写已关闭连接不会杀进程（内部 `MSG_NOSIGNAL`） |
 | 线程 | 一个 socket 允许"一读一写"两线程，不要两个线程同时 recv |
 | 分帧 | `write_frame/read_frame`（4 字节大端长度）与 `read_line` |
+
+### net：TcpServer（accept 循环封装）
+
+```cpp
+#include <my_cpp_libs/net/tcp_server.hpp>
+
+my::net::TcpServerOptions o;
+o.max_connections = 4;
+o.idle_timeout_ms = 3000;
+auto srv = my::net::TcpServer::create({"127.0.0.1", 9000},
+    [](my::net::TcpSocket& sock, const my::net::Endpoint&) {
+        std::string line;
+        if (my::net::read_line(sock, line)) (void)my::net::write_frame(sock, line);
+    }, o);
+srv.value().start();   // 1 个 accept 线程 + 每连接 1 个线程
+// ...
+srv.value().stop();    // 有界：accept 轮询 + 最多等 5s 在途连接
+```
+
+连接上限、空闲超时、重启与 `-fno-exceptions` 下的桩行为见
+[10-网络与HTTP §9](10-网络与HTTP.md)。
 
 ### http：客户端 + 服务端
 
