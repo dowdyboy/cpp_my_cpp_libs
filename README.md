@@ -141,7 +141,7 @@ python scripts/make_test_model.py models/identity_1x1x4.onnx
 
 | 组件 | target | 底层库 | 平台覆盖 | 说明 |
 |---|---|---|---|---|
-| core | `my_cpp_libs::core` | — | 全平台 | `Status` / `Result<T>` / 构建信息 / fp16 转换 / **SHA-256**（`my::hash`） |
+| core | `my_cpp_libs::core` | — | 全平台 | `Status` / `Result<T>` / 构建信息 / fp16 转换 / **SHA-256**（`my::hash`）/ **协议编解码**（CRC16/CRC32、hex、base64、COBS；`my::codec`）/ **崩溃现场捕获**（`my::crash`） |
 | **io** | `my_cpp_libs::io` | `std::filesystem` | 全平台（含 armv7） | 文件/目录/路径/临时文件；**原子写**（临时文件 + rename）；不抛异常，进 `-fno-exceptions` 子集 |
 | **time** | `my_cpp_libs::time` | `<chrono>` | 全平台（含 armv7） | 单调时钟（测耗时）、UTC 时间戳、`Stopwatch`/`ScopedTimer`；进 `-fno-exceptions` 子集 |
 | **thread** | `my_cpp_libs::thread` | `<thread>` | 全平台（含 armv7） | 线程池、有界阻塞队列、周期任务；析构必 drain+join |
@@ -151,7 +151,7 @@ python scripts/make_test_model.py models/identity_1x1x4.onnx
 | infer | `my_cpp_libs::infer` | ONNX Runtime 1.23 / ncnn | **x64 + armv7 + aarch64** | 双后端可插拔；含预处理/后处理（归一化、letterbox、softmax、NMS） |
 | dsp | `my_cpp_libs::dsp` | pocketfft | **全平台（含 armv7）** | 频谱/PSD、FIR/IIR、混频抽取、突发检测、调制识别、AM/FM/ASK/FSK/BPSK 解调；**流式（分块）处理**：`FirFilter`/`BiquadFilter`/`ComplexMixer`/`Decimator`/`Agc` 跨块保持状态 |
 | ml | `my_cpp_libs::ml` | ONNX Runtime（模型由 skl2onnx 导出） | 随 infer（x64 + armv7） | sklearn 表格模型：双输出、特征顺序校验、类别名映射、批量推理；**不新增 C++ 三方库** |
-| net | `my_cpp_libs::net` | —（裸 socket） | **全平台** | TCP 客户端/服务端、UDP 广播组播、超时、SIGPIPE 安全、长度前缀分帧 |
+| net | `my_cpp_libs::net` | —（裸 socket） | **全平台** | TCP 客户端/服务端、UDP 广播组播、超时、SIGPIPE 安全、长度前缀分帧；**`TcpServer`**（accept 循环 + 连接上限 + 空闲超时 + 每连接 handler，noex 构建里为桩） |
 | **serial** | `my_cpp_libs::serial` | —（裸系统调用） | 全平台 | 串口：任意波特率(Windows)/标准档位(Linux)、超时读写、行读取、`flush`、端口枚举；PTY 上真跑收发；进 `-fno-exceptions` 子集 |
 | http | `my_cpp_libs::http` | cpp-httplib 0.66 | 全平台 | HTTP 客户端 + 服务端、JSON 便捷接口、线程池可配；公共头不暴露 httplib |
 | image | `my_cpp_libs::image` | stb_image 2.32 | **全平台（含 armv7）** | 解码/编码、缩放、letterbox→张量；**不依赖 OpenCV**，板端走这条 |
@@ -161,7 +161,7 @@ python scripts/make_test_model.py models/identity_1x1x4.onnx
 
 | 项目 | 结果 |
 |---|---|
-| 单元测试 | 宿主端：全组件 **382 条**（含 cv 12 条）、无 OpenCV **370 条**、no-exceptions 子集 **184 条**——**以 [docs/test-counts.md](docs/test-counts.md)（由 `mylib_tests --list` 生成）为准**；<br>板端 **158 / 158 通过（2026-11-16 上板实测，全组件，2 秒跑完）** ← 0.1.0 时的历史数据 |
+| 单元测试 | 宿主端：全组件 **398 条**（含 cv 12 条）、无 OpenCV **386 条**、no-exceptions 子集 **192 条**——**以 [docs/test-counts.md](docs/test-counts.md)（由 `mylib_tests --list` 生成）为准**；<br>板端 **158 / 158 通过（2026-11-16 上板实测，全组件，2 秒跑完）** ← 0.1.0 时的历史数据 |
 | 板端性能（Zynq-7020） | ml 表格模型 ≈0.07~0.10 ms/次；dsp 全链路 67 ms；image 957 ms；net 36 ms；http 141 ms（见 [06 §0](docs/06-板端验证手册.md)） |
 | 板端性能（Pi 4B / aarch64） | **158/158 通过（1 秒）**；ml 0.016~0.017 ms/次；bench_cnn 74 ms（比 A9 快 10.4×）（见 [06 §0.7](docs/06-板端验证手册.md)） |
 | **全依赖上板** | ✅ 8 个三方库全部有 armv7 产物：Eigen / nlohmann / spdlog / stb / pocketfft（头文件或源码）+ ORT 1.18.1 + ncnn + **OpenCV 4.12（GLIBC_2.29）** |
@@ -255,6 +255,7 @@ docs/                   规划、API、构建、推理、OpenCV、板端验证�
 - [Int8 量化实测](docs/12-量化实测.md) —— 我们自己的工具测出来的 1.36~2.03×、
   为什么小模型反而更慢、为什么合成校准集不可信、以及 ARMv7 上别照搬 x86 数字
 - [串口通信](docs/13-串口通信.md) —— 为什么自己封 COM/termios、超时为什么不算错误、PTY 上怎么真测、板端 dialout/by-id/流控实践
+- [协议编解码与崩溃捕获](docs/14-协议编解码与崩溃捕获.md) —— CRC16/CRC32、hex/base64、COBS 分帧、`my::crash` 的现场输出与能力边界
 - [测试用例数](docs/test-counts.md) —— 由 `mylib_tests --list` 生成的单一来源；CI 校验，避免手写数字漂移
 
 ## 三方库来源

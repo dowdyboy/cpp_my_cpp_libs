@@ -8,6 +8,8 @@
 // =============================================================================
 
 #include "my_cpp_libs/core/build_info.hpp"
+#include "my_cpp_libs/core/codec.hpp"
+#include "my_cpp_libs/core/crash.hpp"
 #include "my_cpp_libs/core/hash.hpp"
 #include "my_cpp_libs/core/status.hpp"
 
@@ -52,9 +54,10 @@
 #  include "my_cpp_libs/dsp/dsp.hpp"
 #endif
 
-// net 组件（TCP/UDP）
+// net 组件（TCP/UDP；tcp_server.hpp 在 -fno-exceptions 构建里为空）
 #if defined(MYLIB_ENABLE_NET_COMPONENT)
 #  include "my_cpp_libs/net/net.hpp"
+#  include "my_cpp_libs/net/tcp_server.hpp"
 #endif
 
 // serial 组件（Windows COM / Linux termios）

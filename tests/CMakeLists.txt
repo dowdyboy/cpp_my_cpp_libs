@@ -14,8 +14,9 @@
 #
 #  另外保留一个 --list 自检：用例注册机制坏了（某个 TU 忘了 MYTEST_SUITE）会暴露。
 # =============================================================================
-set(_test_sources test_main.cpp test_framework_self.cpp test_core.cpp test_hash.cpp)
-set(_test_suites core hash)
+set(_test_sources test_main.cpp test_framework_self.cpp test_core.cpp test_hash.cpp
+                  test_codec.cpp test_crash.cpp)
+set(_test_suites core hash codec crash)
 set(_test_links mylib_core)
 
 if(TARGET mylib_log)
@@ -100,6 +101,12 @@ if(TARGET mylib_net)
     list(APPEND _test_sources test_net.cpp)
     list(APPEND _test_suites net)
     list(APPEND _test_links mylib_net)
+    # TcpServer 的测试需要真实现（异常/线程）。noex 构建里 tcp_server.cpp 是桩，
+    # 这些用例不编（桩的 Unsupported 行为由库侧防御，不在 noex CI 里当成功路径测）。
+    if(NOT MYLIB_NO_EXCEPTIONS)
+        list(APPEND _test_sources test_net_server.cpp)
+        list(APPEND _test_suites net_server)
+    endif()
 endif()
 
 if(TARGET mylib_http)
@@ -145,6 +152,8 @@ endmacro()
 
 mylib_require_suite(core      14 mylib_core       test_core.cpp)
 mylib_require_suite(hash       9 mylib_core       test_hash.cpp)
+mylib_require_suite(codec      6 mylib_core       test_codec.cpp)
+mylib_require_suite(crash      2 mylib_core       test_crash.cpp)
 mylib_require_suite(framework  5 mylib_core       test_framework_self.cpp)
 mylib_require_suite(log       16 mylib_log        test_log.cpp)
 mylib_require_suite(json      15 mylib_json       test_json.cpp)
@@ -160,6 +169,9 @@ mylib_require_suite(dsp       50 mylib_dsp        test_dsp.cpp)
 mylib_require_suite(dsp_stream 11 mylib_dsp       test_dsp_stream.cpp)
 mylib_require_suite(ml        12 mylib_ml         test_ml.cpp)
 mylib_require_suite(net       30 mylib_net        test_net.cpp)
+if(NOT MYLIB_NO_EXCEPTIONS)
+    mylib_require_suite(net_server 8 mylib_net     test_net_server.cpp)
+endif()
 mylib_require_suite(http      25 mylib_http       test_http.cpp)
 mylib_require_suite(image     24 mylib_image      test_image.cpp)
 mylib_require_suite(cv        11 mylib_cv         test_cv.cpp)

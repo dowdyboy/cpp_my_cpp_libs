@@ -62,6 +62,48 @@
 | WSL Ubuntu 24.04（serial PTY） | serial 19/19 通过（含 `serial_pty_peer_close_reports_io_error`） |
 | 关键探针 | 15000 层 JSON → ParseError；`bind({"",0})` IPv4 可达；UDP 100B/`recv_from(10)` → OutOfRange；NaN 正弦 → InvalidArgument；`get<unsigned short>(70000)` → ParseError |
 
+### Tier 1（2026-11-21）—— codec / crash / TcpServer
+
+#### `core::codec`（header-only）
+- CRC：`crc16_ccitt`（CCITT-FALSE，check `0x29B1`）、`crc16_modbus`（`0x4B37`）、
+  `crc32_ieee`（ISO-HDLC / zlib，`0xCBF43926`），以及 `Crc32/Crc16Ccitt/Crc16Modbus`
+  增量类（`value()` 才做 xorout）。
+- hex / base64（标准 + URL-safe、可无 padding、解码忽略空白、失败不改 `out`）。
+- COBS：编码结果含末尾 `0x00`；`cobs_max_encoded_size(n)=n+n/254+2`；
+  `*_into` 零分配接口，cap 不足 `OutOfRange` 且不写 dst。
+- 6 条用例：标准 CRC check 值、增量 vs 一次性、RFC 4648 base64、COBS 规范向量、
+  全 256 字节往返、254/255 边界、`*_into` 与 vector 版逐字节一致、非法输入。
+- 文档：[docs/14-协议编解码与崩溃捕获.md](docs/14-协议编解码与崩溃捕获.md) §1。
+
+#### `core::crash`
+- `crash::install()/uninstall()`：POSIX `sigaction` 接管 SIGSEGV/SIGABRT/SIGFPE/SIGILL/SIGBUS
+  + `sigaltstack`（栈溢出也能跑）+ execinfo backtrace；Windows `SetUnhandledExceptionFilter`
+  + SIGABRT，诊断后交回旧 filter（WER dump 照常产出）；两平台都接管 `std::terminate`。
+- `install()` 预格式化 BuildInfo/exe/PID 到 1024 B 静态缓冲；处理器只 `write(2)`/`WriteFile`
+  + 栈回溯，不分配/不加锁/不碰 stdio；`_Exit(3)` 不 re-raise。
+- `backtrace_text()` 供非信号上下文使用；POSIX 可加 `-rdynamic` 看到函数名，否则用
+  `addr2line`；Windows SEH 只输出地址，用 PDB 离线符号化。
+- 文档：同文件 §2；明确"不替代 core dump"和能力边界。
+
+#### `net::TcpServer`
+- accept 循环 + 连接上限（默认 8，0 拒绝）+ 空闲超时 + 每连接 detached 线程 handler；
+  1 accept 线程、线程只持 `shared_ptr<Impl>`，对象先析构也安全；`stop()` 有界
+  （accept 超时轮询 + 最多等 5s）。
+- `create()` 先 bind（端口冲突提前暴露）；`start()/stop()` 可重启；统计
+  `accepted/rejected/handler_errors/active_connections`。
+- `-fno-exceptions` 构建：类型与 API 照常可见，实现为桩（`create()/start()` 返回
+  `Unsupported`），不会出现"编译过、链接不到符号"的洞；net 其余部分仍在 noex 子集。
+- 8 条用例（回显双客户端、超限拒绝、空闲超时、start 两次、参数校验、move、handler 异常）；
+  文档：[docs/10-网络与HTTP.md](docs/10-网络与HTTP.md) §9。
+
+#### 验证
+| 配置 | 结果 |
+|---|---|
+| MinGW x64 Release（clean） | **388/388 CTest 通过**（386 用例 + 2 守卫），0 告警 |
+| MSVC x64 Release（ORT+OpenCV+ncnn） | **400/400 通过**（398 用例 + 2 守卫），0 告警（修掉 codec 的 C4267） |
+| `-fno-exceptions` 子集 | **194/194 通过**（192 用例 + 2 守卫；net_server 不参与） |
+| 标准向量 | CRC check 值 / RFC 4648 base64 / COBS 规范向量全过；PC 探针验证 SIGABRT/SEH/栈溢出都能打印现场 |
+
 ### 第三轮巡检（2026-11-20）
 
 这一轮先把审计里的 A 级问题全部修掉（问题清单与证据见 `assess/audit-2026-11-20.md`）：

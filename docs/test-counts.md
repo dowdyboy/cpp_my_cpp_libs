@@ -9,8 +9,10 @@
 
 | 套件 | 用例数 |
 |---|---:|
+| `codec` | 6 |
 | `config` | 12 |
 | `core` | 15 |
+| `crash` | 2 |
 | `cv` | 12 |
 | `dsp` | 52 |
 | `dsp_stream` | 11 |
@@ -26,12 +28,13 @@
 | `math` | 15 |
 | `ml` | 14 |
 | `net` | 32 |
+| `net_server` | 8 |
 | `preprocess` | 28 |
 | `serial` | 19 |
 | `thread` | 19 |
 | `time` | 11 |
 
-合计：**382** 条（`mylib_tests --list` 的去重计数；CTest 另加 2 条守卫）。
+合计：**398** 条（`mylib_tests --list` 的去重计数；CTest 另加 2 条守卫）。
 
 可选用例：`cv`（12 条）只在 `MYLIB_ENABLE_CV=ON` 时注册；`ml` 在没有推理后端时
 会整组 SKIP，但条数不变。

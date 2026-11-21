@@ -199,3 +199,65 @@ ctest --preset win-mingw -R "net_|http_" --output-on-failure
 | 高并发/事件驱动 | 换 Asio standalone（接口不变，`my::net` 内部替换） |
 | 代理/重定向 | httplib 有 `set_proxy`/`set_follow_location`，按需暴露 |
 | ~~板端实测~~ | ✅ **已完成（2026-11-16）**：`net` / `http` 全部用例通过（当时 15/15、11/11；当前条数见 [test-counts](test-counts.md)）；`example_net` 36 ms、`example_http` 141 ms |
+
+---
+
+## 9. `my::net::TcpServer`（0.1.10 / Tier 1）
+
+板端每个 TCP 服务都要手抄一段骨架：
+
+```text
+listener.accept() → 判连接数 → 起线程 → set_timeout → 收循环 → 关连接
+```
+
+`TcpServer` 把这套骨架收进库，业务只写 handler。头文件
+`#include <my_cpp_libs/net/tcp_server.hpp>`。
+
+### 9.1 用法
+
+```cpp
+using namespace std::chrono_literals;
+
+my::net::TcpServerOptions opt;
+opt.max_connections  = 4;       // 同时处理的连接上限（必须 >= 1）
+opt.idle_timeout_ms  = 3000;    // handler 里的 recv/read_line 超时
+opt.accept_timeout_ms = 200;    // stop() 的最坏延迟
+
+auto server = my::net::TcpServer::create(
+    {"127.0.0.1", 9000},
+    [](my::net::TcpSocket& sock, const my::net::Endpoint& peer) {
+        // handler 在独立连接线程里跑；返回后 socket 被关闭
+        std::string line;
+        if (auto st = my::net::read_line(sock, line, 4096); !st) return;
+        (void)my::net::write_frame(sock, "echo: " + line);
+    },
+    opt);
+if (!server) { /* server.status() */ }
+if (auto st = server.value().start(); !st) { /* ... */ }
+
+std::printf("listening on %u\n", server.value().port());
+// ...
+server.value().stop();   // 幂等；join accept 线程 + 最多等 5s 让在途连接退出
+```
+
+### 9.2 语义与限制
+
+| 项 | 行为 |
+|---|---|
+| 线程模型 | 1 个 accept 线程 + **每连接 1 个 detached 线程**；线程只持 `shared_ptr<Impl>`，对象先析构、线程后退出也安全 |
+| 连接上限 | `active >= max_connections` 时直接关闭并计入 `rejected_total()`；`max_connections==0` → `create()` 返回 `InvalidArgument` |
+| 空闲超时 | 连接建立时 `set_timeout(idle_timeout_ms)`；handler 的 `recv/read_line` 超时拿到 `Errce::Timeout`。0 = 阻塞（此时 `stop()` 可能等满 5s） |
+| 停止 | `stop()`：置停止标志 → 关 listener（accept 用超时轮询，不跨线程 close）→ join accept 线程 → `active==0` 或 5s |
+| 启动/重启 | `start()` 两次第二次返回 `Busy`；`stop()` 后可在同端口重新 `start()`（端口被抢则 `IoError`） |
+| handler 异常 | 被吞掉并计入 `handler_errors()`，连接照常关闭 |
+| 统计 | `accepted_total()`（handler 之前计数）、`rejected_total()`、`handler_errors()`、`active_connections()` |
+| `-fno-exceptions` | 类型与 API 仍在（不会链接不到符号），实现是桩：`create()/start()` 返回 `Unsupported`，其余空转/0；net 其余部分仍在 noex 子集 |
+
+> 这是"一条控制链路 + 少量遥测连接"的板端服务器，**不是**高并发框架：上百连接请换
+> Asio/epoll 一类实现。handler 里不要调用本对象的 `stop()`/析构（自己等自己）。
+
+### 9.3 测试
+
+`tests/test_net_server.cpp`（套件 `net_server`，仅正常异常构建编译）：回显双客户端、
+超过上限被拒、空闲超时、start 两次 Busy、参数校验、move 安全、handler 异常计数。
+noex 构建里这个套件不参与（桩行为不在 CI 里当成功路径测）。

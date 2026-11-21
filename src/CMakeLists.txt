@@ -22,9 +22,16 @@ configure_file(
     "${CMAKE_CURRENT_BINARY_DIR}/generated/my_cpp_libs/build_info_config.h"
     @ONLY)
 
-set(_core_sources core/status.cpp core/build_info.cpp core/hash.cpp core/path_utf8.cpp)
+set(_core_sources core/status.cpp core/build_info.cpp core/hash.cpp core/path_utf8.cpp
+                  core/crash.cpp)
 mylib_add_component(core SOURCES ${_core_sources})
 target_include_directories(mylib_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+# 崩溃捕获：Windows 用 DbgHelp 的 API（不符号化也要链接），POSIX 的 backtrace 在 libc/dl。
+if(WIN32)
+    target_link_libraries(mylib_core PUBLIC dbghelp)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(mylib_core PUBLIC ${CMAKE_DL_LIBS})
+endif()
 list(APPEND MYLIB_TARGETS mylib_core)
 
 # ---------------------------------------------------------------- io
@@ -120,8 +127,10 @@ if(WIN32)
     list(APPEND _net_link ws2_32)
 endif()
 if(MYLIB_ENABLE_NET)
+    # TcpServer 在 -fno-exceptions 构建里编译成桩：API 仍可链接，create() 返回
+    # Unsupported（不把 std::thread 的异常边界带进 noex 子集）。
     mylib_add_component(net
-        SOURCES net/net.cpp
+        SOURCES net/net.cpp net/tcp_server.cpp
         LINK ${_net_link})
     target_compile_definitions(mylib_net PUBLIC MYLIB_ENABLE_NET_COMPONENT=1)
     list(APPEND MYLIB_TARGETS mylib_net)
