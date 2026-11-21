@@ -322,4 +322,15 @@ MYTEST_CASE(math_all_finite) {
     // 空向量没有非有限值 -> true（数学上是空真）
     const m::VecXd empty;
     CHECK(m::all_finite(empty));
+
+    // 矩阵版本必须扫全部元素。以前只有向量重载，传矩阵在 Release 下只扫第一列：
+    // 这个用例在修复前会失败（NaN 放在 (3,3) 时返回 true）。
+    m::MatXd mat = m::MatXd::Zero(4, 4);
+    CHECK(m::all_finite(mat));
+    mat(3, 3) = std::numeric_limits<double>::quiet_NaN();
+    CHECK(!m::all_finite(mat));
+
+    m::MatXd mat_inf = m::MatXd::Zero(2, 3);
+    mat_inf(1, 2)    = std::numeric_limits<double>::infinity();
+    CHECK(!m::all_finite(mat_inf));
 }

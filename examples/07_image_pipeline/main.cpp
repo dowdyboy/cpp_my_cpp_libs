@@ -71,7 +71,7 @@ int main() {
     my::log::Config cfg;
     cfg.level = my::log::Level::Info;
     cfg.to_console = true;
-    my::log::init(cfg);
+    (void)my::log::init(cfg);
 
     // -------------------------------------------------------------------------
     // 1. 编码 -> 落盘 -> 读回来。板端相机给的是内存帧，SD 卡上的图走文件，

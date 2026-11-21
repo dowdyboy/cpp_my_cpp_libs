@@ -364,9 +364,31 @@ void write(Level level, std::string_view message) noexcept {
 void flush() noexcept {
     try {
         State& st = state();
-        std::lock_guard<std::mutex> lock(st.mutex);
-        if (st.logger) st.logger->flush();
+        std::shared_ptr<spdlog::details::thread_pool> pool;
+        std::shared_ptr<spdlog::logger>              logger;
+        {
+            std::lock_guard<std::mutex> lock(st.mutex);
+            logger = st.logger;
+            pool   = st.pool;
+        }
+        if (!logger) return;
+
+        // 同步 logger：flush() 直接刷 sink。
+        // 异步 logger：flush() 只是把一条 flush 消息**入队**，真正的落盘发生在
+        // 线程池 worker 里；所以这里还要等队列排空，否则进程退出时线程池析构
+        // 会直接丢掉队列里剩下的日志（实测 20 万行有一次只写出 199950 行）。
+        logger->flush();
+        if (pool) {
+            // 有界等待，best-effort：最多 2s，1ms 步进。
+            // 绝不能在持有 st.mutex 时 sleep —— 那会把所有写日志的线程一起堵住。
+            // 超时也返回：flush() 的语义是"尽力而为"，不能永久阻塞调用方。
+            constexpr int kMaxWaitMs = 2000;
+            for (int i = 0; i < kMaxWaitMs && pool->queue_size() > 0; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
     } catch (...) {
+        // 刷新失败不能影响主流程
     }
 }
 

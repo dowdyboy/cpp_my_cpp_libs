@@ -13,6 +13,19 @@ namespace {
 
 using detail::kTwoPi;
 
+/// 输入必须全部有限：NaN/Inf 一旦进 FFT，会顺着窗函数/累加把整段谱污染成 NaN，
+/// 上层再把它当"没有特征"喂给分类器，就会得到自信的错误结论。O(N) 逐元素检查；
+/// 失败消息带第一个非法下标，板端能直接定位坏数据的位置。
+Status check_finite(const Samples& x) {
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        if (!std::isfinite(x[i])) {
+            return Status(Errc::InvalidArgument,
+                          "输入包含 NaN/Inf（第 " + std::to_string(i) + " 个样本）");
+        }
+    }
+    return Ok();
+}
+
 Result<CSamples> transform(const CSamples& x, std::size_t nfft, bool forward) {
     if (x.empty() && nfft == 0) {
         return Status(Errc::InvalidArgument, "FFT 输入为空");
@@ -72,6 +85,7 @@ Result<CSamples> ifft(const CSamples& x) {
 // -----------------------------------------------------------------------------
 Result<Spectrum> welch(const Samples& x, double sample_rate, std::size_t nfft, float overlap,
                        Window window) {
+    if (auto st = check_finite(x); !st) return st;
     if (x.empty()) return Status(Errc::InvalidArgument, "输入信号为空");
     if (sample_rate <= 0.0) return Status(Errc::InvalidArgument, "采样率必须为正");
     if (nfft < 16) return Status(Errc::InvalidArgument, "nfft 至少 16");

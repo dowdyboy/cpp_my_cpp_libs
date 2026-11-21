@@ -288,5 +288,80 @@ MYTEST_CASE(thread_periodic_task_stop_from_callback) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     CHECK(!task->running());
-    task->stop();  // 幂等（这次从主线程 join，把 detach 的尾巴收掉）
+    // 回调里的 stop() 已经置停止标志并 detach（不能 join 自己）；这里从主线程
+    // 再调一次必须是幂等的，不能崩也不能等待一个已经 detach 的线程。
+    task->stop();
+}
+
+// 两个外部线程并发 stop()：旧实现各自对同一个 std::thread 调 join（UB）。
+// 要求内部 join_mutex_ 串行化 join，且停止后 running()==false。
+MYTEST_CASE(thread_periodic_task_concurrent_stop_is_safe) {
+    std::atomic<int> calls{0};
+    auto made = my::thread::PeriodicTask::create(std::chrono::milliseconds(5),
+                                                 [&calls] { calls.fetch_add(1); });
+    CHECK_RESULT(made);
+    auto task = std::move(made.value());
+
+    // 等周期线程真的跑起来，确保 stop 落在 loop 内部而不是创建阶段
+    for (int i = 0; i < 1000 && task->ticks() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(task->ticks() > 0);
+    CHECK(task->running());
+
+    std::atomic<bool> go{false};
+    std::thread       a([&] {
+        while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+        task->stop();
+    });
+    std::thread       b([&] {
+        while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+        task->stop();
+    });
+    go.store(true, std::memory_order_release);
+    a.join();
+    b.join();
+
+    // 能走到这里说明没有双 join 崩溃；join 完成后 running() 必须已经是 false
+    CHECK(!task->running());
+    const auto ticks_after = task->ticks();
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_EQ(task->ticks(), ticks_after);  // 线程已退出，ticks 不再增长
+    CHECK_EQ(static_cast<std::uint64_t>(calls.load()), ticks_after);
+}
+
+// 在回调线程内销毁任务：析构 → stop() → detach。线程之后只能访问
+// shared_ptr<State>，不能碰已释放的 this（旧实现是 use-after-free）。
+MYTEST_CASE(thread_periodic_task_destroyed_in_callback_is_safe) {
+    std::atomic<std::uint64_t>             calls{0};
+    std::atomic<my::thread::PeriodicTask*> raw{nullptr};
+    std::atomic<bool>                      destroyed{false};
+
+    auto made = my::thread::PeriodicTask::create(std::chrono::milliseconds(10), [&] {
+        calls.fetch_add(1, std::memory_order_relaxed);
+        auto* self = raw.exchange(nullptr, std::memory_order_acq_rel);
+        if (self != nullptr) {
+            delete self;  // 回调线程内销毁：对象没了，但线程持有 State，loop() 仍安全
+            destroyed.store(true, std::memory_order_release);
+        }
+    });
+    CHECK_RESULT(made);
+    auto task = std::move(made.value());
+    raw.store(task.release(), std::memory_order_release);  // 所有权交给回调
+
+    // 等回调真的把对象删掉；超时说明周期线程没跑起来
+    for (int i = 0; i < 1000 && !destroyed.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!destroyed.load(std::memory_order_acquire)) {
+        // 兜底：用例失败时把对象收回（主线程析构走正常 join 路径），
+        // 别让周期线程继续引用这个栈帧上的原子变量。
+        if (auto* left = raw.exchange(nullptr, std::memory_order_acq_rel)) delete left;
+    }
+    CHECK(destroyed.load(std::memory_order_acquire));
+
+    // 销毁后线程会在下一个周期点退出：回调次数不能再涨（观察 6 个周期）
+    const auto after = calls.load(std::memory_order_relaxed);
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    CHECK_EQ(calls.load(std::memory_order_relaxed), after);
 }

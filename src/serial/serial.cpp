@@ -513,6 +513,22 @@ Result<std::size_t> Port::read_some(void* buf, std::size_t n, std::chrono::milli
             return io_status("poll", name_);
         }
         if (rc == 0) return std::size_t{0};  // 超时：没数据，不是错误
+        // 对端挂断/串口错误：PTY master 关闭后 poll 会立刻返回 POLLHUP，紧接着
+        // read() 返回 0。修复前只等 POLLIN、不看 revents，于是这里被当成
+        // "超时 0 字节 + Ok"；文档推荐的 `if (n == 0) continue;` 会 100% 空转。
+        if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+            std::string what = "串口对端挂断/串口错误（";
+            if ((pfd.revents & POLLNVAL) != 0) {
+                what += "POLLNVAL，句柄无效";
+            } else if ((pfd.revents & POLLERR) != 0) {
+                what += "POLLERR";
+            } else {
+                what += "POLLHUP，对端挂断";
+            }
+            what += "）";
+            if (!name_.empty()) what += ": " + name_;
+            return Status(Errc::IoError, std::move(what));
+        }
         break;
     }
     for (;;) {
@@ -521,6 +537,12 @@ Result<std::size_t> Port::read_some(void* buf, std::size_t n, std::chrono::milli
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) return std::size_t{0};
             return io_status("read", name_);
+        }
+        if (got == 0) {
+            // 没有挂断标志但 read 返回 0：POSIX 语义是 EOF，同样不能当超时。
+            std::string msg = "串口对端挂断/EOF（read 返回 0）";
+            if (!name_.empty()) msg += ": " + name_;
+            return Status(Errc::IoError, std::move(msg));
         }
         return static_cast<std::size_t>(got);
     }

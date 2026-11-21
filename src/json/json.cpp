@@ -3,6 +3,7 @@
 
 #include "my_cpp_libs/json/config.hpp"  // merge_into / document_from_env / Layered
 
+#include <cstddef>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
@@ -143,20 +144,33 @@ std::vector<std::string> Document::keys(std::string_view path) const {
 // =============================================================================
 namespace {
 
-/// 深合并：对象递归，数组/标量整体替换
-void merge_json(Json& base, const Json& overlay) {
+/// 深合并：对象递归，数组/标量整体替换。
+///
+/// depth 是兜底用的递归深度：Document::parse 保证内部文档 ≤ kMaxNestingDepth，
+/// 但 Document(Json) / raw() 是逃生舱，外部可以塞进任意深的 Json。超过上限返回
+/// RuntimeError，保证 **对象递归合并** 这条路径不会把调用栈打穿（此时 base 可能
+/// 已被部分修改；只有外部构造的超深输入才会走到这里）。注意：整体赋值
+/// `base[key] = overlay[key]` 仍走 nlohmann 自己的递归拷贝，逃生舱子树太深时
+/// 需要调用方自行保证深度。
+Status merge_json(Json& base, const Json& overlay, std::size_t depth) {
+    if (depth > kMaxNestingDepth) {
+        return Status(Errc::RuntimeError,
+                      "JSON 深合并深度超过上限 " + std::to_string(kMaxNestingDepth) +
+                          "（外部构造的 Json 需自行保证深度）");
+    }
     if (base.is_object() && overlay.is_object()) {
         for (auto it = overlay.begin(); it != overlay.end(); ++it) {
             auto at = base.find(it.key());
             if (at != base.end()) {
-                merge_json(*at, it.value());
+                if (auto st = merge_json(*at, it.value(), depth + 1); !st) return st;
             } else {
                 base[it.key()] = it.value();
             }
         }
-        return;
+        return Ok();
     }
     base = overlay;
+    return Ok();
 }
 
 /// 尽量按 JSON 解析值；失败就当字符串（配置文件里写 8080 / true / "abc" 都自然）
@@ -181,8 +195,7 @@ char** environ_table() noexcept {
 
 Status merge_into(Document& base, const Document& overlay) {
     try {
-        merge_json(base.raw(), overlay.raw());
-        return Ok();
+        return merge_json(base.raw(), overlay.raw(), 0);
     } catch (const std::exception& e) {
         return Status(Errc::RuntimeError, std::string("配置合并失败: ") + e.what());
     }

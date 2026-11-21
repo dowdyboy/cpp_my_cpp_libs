@@ -3,16 +3,22 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <utility>
+#include <vector>
 
 // 支持以下几种过滤方式，ctest 会据此按用例逐个注册：
 //   mylib_tests --case=preprocess_nms       只跑这一个用例（名字必须完全一致）
 //   mylib_tests --suite=preprocess          跑一个套件
 //   mylib_tests --filter=nms                按用例名子串
 //   mylib_tests --list                      列出所有用例（suite:name）
-//   mylib_tests --expect-cases=356          用例总数必须正好是 356（守卫"用例静默消失"）
+//   mylib_tests --expect-cases=N            用例总数必须正好是 N（守卫"用例静默消失"）
+//   mylib_tests --min-suite=net:30          指定套件至少 N 条（守卫"整个 TU 掉出列表"，
+//                                           可重复；由 tests/CMakeLists.txt 按当前值传入）
 //   mylib_tests --fail-on-skip              有 skip 的用例就判失败
 int main(int argc, char** argv) {
     mytest::RunOptions opt;
+    std::vector<mytest::SuiteRequirement> min_suites;
     bool list          = false;
     long expected      = -1;
 
@@ -28,6 +34,21 @@ int main(int argc, char** argv) {
             opt.exact_name  = false;
         } else if (std::strncmp(a, "--expect-cases=", 15) == 0) {
             expected = std::strtol(a + 15, nullptr, 10);
+        } else if (std::strncmp(a, "--min-suite=", 12) == 0) {
+            const char* spec  = a + 12;
+            const char* colon = std::strrchr(spec, ':');
+            if (colon == nullptr || colon == spec || colon[1] == '\0') {
+                std::printf("错误: --min-suite 的格式应为 name:N（收到 %s）\n", spec);
+                return 2;
+            }
+            mytest::SuiteRequirement req;
+            req.name    = std::string(spec, static_cast<std::size_t>(colon - spec));
+            req.minimum = static_cast<int>(std::strtol(colon + 1, nullptr, 10));
+            if (req.minimum <= 0) {
+                std::printf("错误: --min-suite 的 N 必须 > 0（收到 %s）\n", spec);
+                return 2;
+            }
+            min_suites.push_back(std::move(req));
         } else if (std::strcmp(a, "--fail-on-skip") == 0) {
             opt.fail_on_skip = true;
         } else if (std::strcmp(a, "--list") == 0) {
@@ -38,7 +59,7 @@ int main(int argc, char** argv) {
         } else {
             std::printf("未知参数: %s\n"
                         "用法: %s [--case=NAME] [--suite=NAME] [--filter=SUBSTR] [--list]\n"
-                        "          [--expect-cases=N] [--fail-on-skip]\n",
+                        "          [--expect-cases=N] [--min-suite=NAME:N]... [--fail-on-skip]\n",
                         a, argv[0]);
             return 2;
         }
@@ -57,8 +78,12 @@ int main(int argc, char** argv) {
             return 2;
         }
         std::printf("用例数校验通过: %ld\n", actual);
-        if (!list) return 0;  // 只校验数量，不跑用例
     }
+
+    // 套件最小条数：expect-cases 只比较"二进制 vs 参与编译的源码"，整套 TU
+    // 掉出 _test_sources 时两边一起缩水；这里按套件兜底。
+    if (!min_suites.empty() && !mytest::check_suite_minima(min_suites)) return 2;
+    if (expected >= 0 && !list) return 0;  // 只校验数量，不跑用例
 
     if (list) {
         mytest::list_cases();

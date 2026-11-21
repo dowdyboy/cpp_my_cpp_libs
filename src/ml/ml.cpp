@@ -52,6 +52,15 @@ Result<Model> Model::load(const std::string& onnx_path, const std::string& sidec
         return Status(Errc::NotFound, "模型文件不存在: " + onnx_path);
     }
 
+    // 显式指定的 sidecar 必须存在：路径写错/文件漏拷是明确的 NotFound，
+    // 不能静默降级成"没有 sidecar"继续跑（自动推导出来的 sidecar 缺失仍允许）。
+    // 放在建 session 之前：这类参数错误不依赖推理后端，没有 ORT 也能给出正确错误。
+    const bool        explicit_sidecar = !sidecar_path.empty();
+    const std::string sc = explicit_sidecar ? sidecar_path : sibling_json(onnx_path);
+    if (explicit_sidecar && !file_exists(sc)) {
+        return Status(Errc::NotFound, "sidecar 文件不存在: " + sc);
+    }
+
     infer::Options opt;
     opt.model_path = onnx_path;
     auto session = infer::create_session(opt);
@@ -95,8 +104,7 @@ Result<Model> Model::load(const std::string& onnx_path, const std::string& sidec
     }
     m.meta_.kind = m.meta_.label_output.empty() ? Kind::Regressor : Kind::Classifier;
 
-    // sidecar
-    std::string sc = sidecar_path.empty() ? sibling_json(onnx_path) : sidecar_path;
+    // sidecar（"显式指定但不存在"已在入口处返回 NotFound，这里只处理存在的）
     if (file_exists(sc)) {
         const Status st = m.load_sidecar(sc);
         if (!st) return st;
@@ -130,110 +138,132 @@ Status Model::load_sidecar(const std::string& path) {
     (void)path;
     return Ok();
 #else
-    auto doc = my::json::Document::parse_file(path);
-    if (!doc) return doc.status();
+    // 整个解析过程包在 try 里：nlohmann 的 type_error 绝不能从公共 API 逸出。
+    // 逐字段的 is_* 校验是第一道防线，这里是最后兜底（例如数组元素的类型写错）。
+    try {
+        auto doc = my::json::Document::parse_file(path);
+        if (!doc) return doc.status();
 
-    const auto& d = doc.value();
+        const auto& d = doc.value();
 
-    const std::string fmt = d.get_or<std::string>("format", "");
-    if (fmt.rfind("my_cpp_libs.ml/", 0) != 0) {
-        return Status(Errc::ParseError, "sidecar 格式不匹配（缺少 format=my_cpp_libs.ml/*）: " + path);
-    }
-    meta_.format       = fmt;
-    meta_.sidecar_path = path;
-
-    const std::string kind = d.get_or<std::string>("kind", "");
-    if (kind == "classifier") {
-        meta_.kind = Kind::Classifier;
-    } else if (kind == "regressor") {
-        meta_.kind = Kind::Regressor;
-    } else {
-        return Status(Errc::ParseError, "sidecar 的 kind 只能是 classifier/regressor: " + kind);
-    }
-
-    // 模型文件摘要（导出脚本写进去的）。没有这个字段就不校验 —— 兼容老 sidecar。
-    // 注意：导出脚本把摘要写在 `model.sha256`（与 `model.onnx` 同级），不是顶层。
-    // 0.1.7~0.1.9 这里读的是顶层 "sha256"，导致校验永远不执行；顶层读取保留为
-    // 兼容老 sidecar 的退路。
-    meta_.onnx_sha256 = d.get_or<std::string>("model.sha256", "");
-    if (meta_.onnx_sha256.empty()) {
-        meta_.onnx_sha256 = d.get_or<std::string>("sha256", "");
-    }
-    if (!meta_.onnx_sha256.empty() && meta_.onnx_sha256.size() != 64) {
-        return Status(Errc::ParseError,
-                      "sidecar 的 model.sha256 必须是 64 位十六进制，实际长度 " +
-                          std::to_string(meta_.onnx_sha256.size()) + ": " + path);
-    }
-
-    // ---- 输入 ----
-    if (auto r = d.get<std::string>("input.name"); r) {
-        // 图里的端口名以模型为准，这里只做一致性校验
-        if (r.value() != meta_.input_name) {
+        const std::string fmt = d.get_or<std::string>("format", "");
+        if (fmt.rfind("my_cpp_libs.ml/", 0) != 0) {
             return Status(Errc::ParseError,
-                          "sidecar 的 input.name(" + r.value() + ") 与模型端口(" +
-                              meta_.input_name + ") 不一致");
+                          "sidecar 格式不匹配（缺少 format=my_cpp_libs.ml/*）: " + path);
         }
-    }
-    const int nf = d.get_or<int>("input.n_features", 0);
-    if (nf > 0) {
-        if (meta_.n_features > 0 && meta_.n_features != nf) {
-            return Status(Errc::ParseError,
-                          "sidecar 的 n_features(" + std::to_string(nf) +
-                              ") 与模型输入维度(" + std::to_string(meta_.n_features) + ") 不一致");
-        }
-        meta_.n_features = nf;
-    }
-    if (auto r = d.get<std::vector<std::string>>("input.features"); r) {
-        meta_.features = r.value();
-        if (!meta_.features.empty() &&
-            meta_.features.size() != static_cast<std::size_t>(meta_.n_features)) {
-            return Status(Errc::ParseError,
-                          "sidecar 的 features 数量与 n_features 不一致");
-        }
-    }
+        meta_.format       = fmt;
+        meta_.sidecar_path = path;
 
-    // ---- 输出 ----
-    // skl2onnx 的输出名不一定叫 label/probabilities，以 sidecar 里记录的为准，
-    // 但要回模型里确认这些名字真的存在。
-    if (auto items = d.get<nlohmann::json>("output.items"); items) {
-        for (const auto& it : items.value()) {
-            if (!it.contains("name") || !it.contains("dtype")) continue;
-            const std::string name = it["name"].get<std::string>();
-            const std::string dt   = it["dtype"].get<std::string>();
-            bool found = false;
-            for (const auto& p : session_->outputs()) {
-                if (p.name == name) {
-                    found = true;
-                    break;
+        const std::string kind = d.get_or<std::string>("kind", "");
+        if (kind == "classifier") {
+            meta_.kind = Kind::Classifier;
+        } else if (kind == "regressor") {
+            meta_.kind = Kind::Regressor;
+        } else {
+            return Status(Errc::ParseError, "sidecar 的 kind 只能是 classifier/regressor: " + kind);
+        }
+
+        // 模型文件摘要（导出脚本写进去的）。没有这个字段就不校验 —— 兼容老 sidecar。
+        // 注意：导出脚本把摘要写在 `model.sha256`（与 `model.onnx` 同级），不是顶层。
+        // 0.1.7~0.1.9 这里读的是顶层 "sha256"，导致校验永远不执行；顶层读取保留为
+        // 兼容老 sidecar 的退路。
+        meta_.onnx_sha256 = d.get_or<std::string>("model.sha256", "");
+        if (meta_.onnx_sha256.empty()) {
+            meta_.onnx_sha256 = d.get_or<std::string>("sha256", "");
+        }
+        if (!meta_.onnx_sha256.empty() && meta_.onnx_sha256.size() != 64) {
+            return Status(Errc::ParseError,
+                          "sidecar 的 model.sha256 必须是 64 位十六进制，实际长度 " +
+                              std::to_string(meta_.onnx_sha256.size()) + ": " + path);
+        }
+
+        // ---- 输入 ----
+        if (auto r = d.get<std::string>("input.name"); r) {
+            // 图里的端口名以模型为准，这里只做一致性校验
+            if (r.value() != meta_.input_name) {
+                return Status(Errc::ParseError,
+                              "sidecar 的 input.name(" + r.value() + ") 与模型端口(" +
+                                  meta_.input_name + ") 不一致");
+            }
+        }
+        const int nf = d.get_or<int>("input.n_features", 0);
+        if (nf > 0) {
+            if (meta_.n_features > 0 && meta_.n_features != nf) {
+                return Status(Errc::ParseError,
+                              "sidecar 的 n_features(" + std::to_string(nf) +
+                                  ") 与模型输入维度(" + std::to_string(meta_.n_features) + ") 不一致");
+            }
+            meta_.n_features = nf;
+        }
+        if (auto r = d.get<std::vector<std::string>>("input.features"); r) {
+            meta_.features = r.value();
+            if (!meta_.features.empty() &&
+                meta_.features.size() != static_cast<std::size_t>(meta_.n_features)) {
+                return Status(Errc::ParseError, "sidecar 的 features 数量与 n_features 不一致");
+            }
+        }
+
+        // ---- 输出 ----
+        // skl2onnx 的输出名不一定叫 label/probabilities，以 sidecar 里记录的为准，
+        // 但要回模型里确认这些名字真的存在。
+        if (auto items = d.get<nlohmann::json>("output.items"); items) {
+            if (!items.value().is_array()) {
+                return Status(Errc::ParseError, "sidecar 的 output.items 必须是数组: " + path);
+            }
+            for (const auto& it : items.value()) {
+                if (!it.is_object()) {
+                    return Status(Errc::ParseError,
+                                  "sidecar 的 output.items 元素必须是对象: " + path);
+                }
+                if (!it.contains("name") || !it.contains("dtype")) continue;
+                // 不能直接 it["name"].get<std::string>()：字段类型写错会抛 type_error，
+                // 从 Model::load 一路穿出公共 API（实测 {"name":123} 直接崩溃/抛异常）。
+                if (!it["name"].is_string() || !it["dtype"].is_string()) {
+                    return Status(Errc::ParseError,
+                                  "sidecar 的 output.items.name/dtype 必须是字符串: " + path);
+                }
+                const std::string name = it["name"].get<std::string>();
+                const std::string dt   = it["dtype"].get<std::string>();
+                bool found = false;
+                for (const auto& p : session_->outputs()) {
+                    if (p.name == name) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    return Status(Errc::ParseError,
+                                  "sidecar 里的输出 " + name + " 在模型里不存在（模型换过？）");
+                }
+                if (dt == "int64" || dt == "int32") {
+                    meta_.label_output = name;
+                } else if (dt == "float") {
+                    meta_.score_output = name;
                 }
             }
-            if (!found) {
-                return Status(Errc::ParseError,
-                              "sidecar 里的输出 " + name + " 在模型里不存在（模型换过？）");
-            }
-            if (dt == "int64" || dt == "int32") {
-                meta_.label_output = name;
-            } else if (dt == "float") {
-                meta_.score_output = name;
-            }
         }
-    }
-    if (meta_.score_output.empty()) {
-        return Status(Errc::ParseError, "sidecar 里没有 float 输出");
-    }
-    meta_.kind = meta_.label_output.empty() ? Kind::Regressor : Kind::Classifier;
+        if (meta_.score_output.empty()) {
+            return Status(Errc::ParseError, "sidecar 里没有 float 输出");
+        }
+        meta_.kind = meta_.label_output.empty() ? Kind::Regressor : Kind::Classifier;
 
-    if (auto r = d.get<std::vector<std::string>>("output.classes"); r) {
-        meta_.classes = r.value();
+        if (auto r = d.get<std::vector<std::string>>("output.classes"); r) {
+            meta_.classes = r.value();
+        }
+        if (auto r = d.get<std::vector<std::int64_t>>("output.class_ids"); r) {
+            meta_.class_ids = r.value();
+        }
+        if (meta_.kind == Kind::Classifier && !meta_.classes.empty() &&
+            meta_.classes.size() != meta_.class_ids.size() && !meta_.class_ids.empty()) {
+            return Status(Errc::ParseError, "sidecar 的 classes 与 class_ids 数量不一致");
+        }
+        return Ok();
+    } catch (const std::exception& e) {
+        return Status(Errc::ParseError,
+                      std::string("sidecar 解析失败: ") + e.what() + ": " + path);
+    } catch (...) {
+        return Status(Errc::ParseError, "sidecar 解析失败: 未知错误: " + path);
     }
-    if (auto r = d.get<std::vector<std::int64_t>>("output.class_ids"); r) {
-        meta_.class_ids = r.value();
-    }
-    if (meta_.kind == Kind::Classifier && !meta_.classes.empty() &&
-        meta_.classes.size() != meta_.class_ids.size() && !meta_.class_ids.empty()) {
-        return Status(Errc::ParseError, "sidecar 的 classes 与 class_ids 数量不一致");
-    }
-    return Ok();
 #endif
 }
 

@@ -43,15 +43,15 @@ int main() {
     //  2) 手工构造 + 路径写入（自动创建中间节点）
     // -------------------------------------------------------------------------
     my::json::Document doc;
-    doc.set("app_name", "my_cpp_libs demo");
-    doc.set("camera.name", "cam_front");
-    doc.set("camera.width", 1920);
-    doc.set("camera.height", 1080);
-    doc.set("camera.fps", 60.0);
-    doc.set("devices[0]", "imu0");
-    doc.set("devices[1]", "lidar0");
-    doc.set("network.host", "127.0.0.1");
-    doc.set("network.port", 9000);
+    (void)doc.set("app_name", "my_cpp_libs demo");
+    (void)doc.set("camera.name", "cam_front");
+    (void)doc.set("camera.width", 1920);
+    (void)doc.set("camera.height", 1080);
+    (void)doc.set("camera.fps", 60.0);
+    (void)doc.set("devices[0]", "imu0");
+    (void)doc.set("devices[1]", "lidar0");
+    (void)doc.set("network.host", "127.0.0.1");
+    (void)doc.set("network.port", 9000);
 
     my::log::info("生成的 JSON:\n{}", doc.dump(2));
 
@@ -114,7 +114,7 @@ int main() {
     my::log::info("devices 数量 = {}", from_struct.size("devices"));
 
     // 删除字段
-    loaded.value().erase("network.port");
+    (void)loaded.value().erase("network.port");
     my::log::info("删除 network.port 后 keys(network) = {}",
                   loaded.value().keys("network").size());
 

@@ -199,6 +199,28 @@ MYTEST_CASE(half_bit_exact) {
 // -----------------------------------------------------------------------------
 //  Result<T> 的变换/兜底语义
 // -----------------------------------------------------------------------------
+MYTEST_CASE(core_result_rejects_ok_status_contract) {
+    // Result(Status) 只接受失败状态：Ok 不是失败值。
+    //
+    // 反例 `my::Result<int> r = my::Ok();` 会在构造时 abort（和 value() 违反前置条件
+    // 同一处理方式，见 status.hpp），无法在进程内测；这里验证合法路径 —— 用真正的
+    // 失败状态构造后必须 ok()==false，且错误码/消息原样可观测，不能出现
+    // "ok()==false 但 status().ok()==true" 的非法对象。
+    my::Result<int> bad{my::Status{my::Errc::IoError, "x"}};
+    CHECK(!bad.ok());
+    CHECK(!static_cast<bool>(bad));
+    CHECK(!bad.status().ok());
+    CHECK_EQ(bad.status().code(), my::Errc::IoError);
+    CHECK_EQ(bad.status().message(), std::string("x"));
+    CHECK_EQ(bad.value_or(7), 7);
+
+    // 从 Result 里再把失败状态拿出来构造另一个 Result，也必须保持失败语义
+    my::Result<std::string> forwarded{bad.status()};
+    CHECK(!forwarded.ok());
+    CHECK_EQ(forwarded.status().code(), my::Errc::IoError);
+    CHECK_EQ(forwarded.value_or(std::string("fallback")), std::string("fallback"));
+}
+
 MYTEST_CASE(core_result_map_propagates_error) {
     my::Result<int> bad(my::Status(my::Errc::ParseError, "字段缺失"));
 

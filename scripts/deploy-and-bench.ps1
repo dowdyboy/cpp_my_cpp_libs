@@ -30,7 +30,12 @@ param(
     [Parameter(ParameterSetName = 'Deploy')]
     [int] $Port = 22,
 
-    [string] $Preset = 'linux-armv7',
+    # 默认用全静态预设：PetaLinux 2020.2 的板子是 glibc 2.30，
+    # linux-armv7（2024 SDK / glibc 2.39）编出来的动态产物在板上会报
+    # "GLIBC_2.38 not found"。全静态产物不依赖板端 glibc，是 Windows 侧
+    # 唯一能直接产出"可上板"二进制的预设。要用板子配套 SDK 构建时显式传
+    # -Preset linux-armv7-sdk2020（该预设只能在装了 SDK 的 Linux 上配置）。
+    [string] $Preset = 'linux-armv7-static',
     [string] $Model  = 'models\small_cnn.onnx',
     [switch] $SkipBuild,
     [string] $RemoteDir = '/tmp/mylib'
@@ -75,12 +80,37 @@ foreach ($f in $files) {
     }
 }
 
-# ONNX Runtime 动态库（SONAME 是 libonnxruntime.so.1，名字不能改）
-$ort = Join-Path $root 'third_party\onnxruntime-linux-armv7-1.23.2\lib\libonnxruntime.so.1'
-if (Test-Path $ort) {
-    Copy-Item $ort (Join-Path $stage 'libonnxruntime.so.1') -Force
+# ONNX Runtime 动态库。
+#
+# **不要用 linux-armv7（2024 SDK）编出来的 1.23.2**：它要求 GLIBC_2.38，
+# 而板子是 glibc 2.30。板端能用的只有 petalinux2020 那一份 1.18.1（GLIBC_2.29），
+# 且它的 SONAME 是 libonnxruntime.so.1.18.1 —— 按 SONAME 原名拷，别改名。
+if ($Preset -match 'static') {
+    Write-Host "  静态预设：不拷 ORT（该预设 MYLIB_ENABLE_ONNXRUNTIME=OFF，推理走 ncnn/stub）"
 } else {
-    Write-Warning "没有找到 armv7 版 libonnxruntime.so.1，板端将无法用 onnxruntime 后端"
+    $ortCandidates = @(
+        @{ Src = 'third_party\onnxruntime-armv7-petalinux2020\lib\libonnxruntime.so.1.18.1';
+           Dst = 'libonnxruntime.so.1.18.1' },
+        @{ Src = 'third_party\onnxruntime-linux-armv7-1.23.2\lib\libonnxruntime.so.1';
+           Dst = 'libonnxruntime.so.1' }
+    )
+    $ortCopied = $false
+    foreach ($c in $ortCandidates) {
+        $p = Join-Path $root $c.Src
+        if (Test-Path $p) {
+            Copy-Item $p (Join-Path $stage $c.Dst) -Force
+            Write-Host "  已拷贝 $($c.Src) -> $($c.Dst)"
+            if ($c.Dst -eq 'libonnxruntime.so.1') {
+                Write-Warning ("这份 ORT 需要 GLIBC_2.38，glibc 2.30 的板子跑不起来；" +
+                    "请改用 -Preset linux-armv7-sdk2020 或 linux-armv7-static")
+            }
+            $ortCopied = $true
+            break
+        }
+    }
+    if (-not $ortCopied) {
+        Write-Warning "没有找到 armv7 版 libonnxruntime.so.*，板端将无法用 onnxruntime 后端"
+    }
 }
 
 # 模型
@@ -101,8 +131,10 @@ if ($Model -and (Test-Path $Model)) {
 # my_cpp_libs 板端验证
 
 export LD_LIBRARY_PATH=`$PWD:`$LD_LIBRARY_PATH
+# 测试里的模型目录优先读这个环境变量；不设会退回编译期路径（另一台机器的路径）。
+export MYLIB_TEST_MODELS_DIR=`$PWD/models
 
-# 1) 单元测试（63 个用例）
+# 1) 单元测试（用例数随版本增长，以 ./mylib_tests --list 的条数为准）
 ./mylib_tests
 
 # 2) 模型体检 + 延迟
@@ -157,6 +189,7 @@ Write-Host "==> 板端执行" -ForegroundColor Cyan
 $remote = @"
 cd $RemoteDir && chmod +x mylib_tests model_inspect example_pipeline && \
 export LD_LIBRARY_PATH=`$PWD:`$LD_LIBRARY_PATH && \
+export MYLIB_TEST_MODELS_DIR=`$PWD/models && \
 echo '===== 环境 =====' && uname -a && (grep -E 'model name|Features' /proc/cpuinfo | head -2) && free -m | head -2 && \
 echo '===== 单元测试 =====' && ./mylib_tests | tail -3 && \
 echo '===== 推理基准 =====' && ./model_inspect models/small_cnn.onnx --run --bench 10 | tail -6

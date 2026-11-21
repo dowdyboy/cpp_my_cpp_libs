@@ -3,12 +3,17 @@
 # ASCII ONLY -- do not add CJK text here: PS 5.1 reads this BOM-less file as ANSI\n# and mangled bytes inside comments swallow the following lines (this bit us once).
 param(
     [Parameter(Mandatory = $true)][string] $Package,
-    [ValidateSet('host', 'cross')][string] $Mode = 'host'
+    [ValidateSet('host', 'cross')][string] $Mode = 'host',
+    # Fail if BUILD-INFO.txt's commit is not the current HEAD (release gate).
+    [switch] $StrictCommit
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot   # this script lives in scripts/
 Set-Location $root
 $env:PATH = "D:\ProgramFiles\msys64\ucrt64\bin;D:\ProgramFiles\ninja-win;$env:PATH"
+# Standalone use (README documents verify-package.ps1 -Package ...) must not
+# depend on package-all.ps1 having created the log directory first.
+New-Item -ItemType Directory -Force -Path (Join-Path $root 'build\_logs') | Out-Null
 
 # Strip only the archive suffix: GetFileNameWithoutExtension would also eat ".msvc".
 $leaf = Split-Path $Package -Leaf
@@ -31,6 +36,7 @@ Write-Host "  prefix: $($inner.Name)"
 
 Write-Host "== tree sanity =="
 $checks = @(
+    'BUILD-INFO.txt',
     'include\my_cpp_libs\core\status.hpp',
     'include\my_cpp_libs\io\io.hpp',
     'include\my_cpp_libs\time\time.hpp',
@@ -65,6 +71,27 @@ foreach ($c in $checks) {
     if (Test-Path (Join-Path $prefix $c)) { Write-Host "  OK   $c" }
     else { Write-Host "  MISS $c"; $bad++ }
 }
+
+# BUILD-INFO.txt must be readable and (for release verification) point at HEAD.
+$info = Join-Path $prefix 'BUILD-INFO.txt'
+if (Test-Path $info) {
+    $commitLine = Select-String -Path $info -Pattern '^commit:\s+(\S+)' | Select-Object -First 1
+    $pkgCommit = if ($commitLine) { $commitLine.Matches[0].Groups[1].Value } else { '' }
+    Write-Host "  BUILD-INFO commit: $pkgCommit"
+    if ($StrictCommit) {
+        $git = Get-Command git -ErrorAction SilentlyContinue
+        if (-not $git) { Write-Host "  strict-commit: git not found"; $bad++ }
+        else {
+            $head = (git -C $root rev-parse --short=12 HEAD) 2>$null
+            if ($LASTEXITCODE -ne 0 -or -not $head) { Write-Host "  strict-commit: cannot read HEAD"; $bad++ }
+            elseif ($pkgCommit -ne $head) {
+                Write-Host "  strict-commit: MISMATCH (package $pkgCommit, HEAD $head)"
+                $bad++
+            } else { Write-Host "  strict-commit: OK ($head)" }
+        }
+    }
+}
+
 $cfg = Join-Path $prefix 'lib\cmake\my_cpp_libs\my_cpp_libsConfig.cmake'
 if (Test-Path $cfg) {
     $has17 = (Select-String -Path $cfg -Pattern 'cxx_std_17' -SimpleMatch).Count

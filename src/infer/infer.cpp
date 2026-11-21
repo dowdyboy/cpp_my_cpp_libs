@@ -5,6 +5,7 @@
 #include "my_cpp_libs/core/half.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -297,21 +298,50 @@ Result<std::unique_ptr<Session>> create_session(const Options& options) {
             // 没有模型文件就不必加载真实后端，stub 足够跑通调用链
             chosen = "stub";
         } else {
-            // 有模型就只考虑"真能加载模型"的后端。
+            // 有模型就只考虑"真能加载这个格式"的后端。
             // 绝不能悄悄退回 stub —— 那会让"模型跑通了"变成假象。
-            // 按扩展名给个默认倾向：.param 是 ncnn，其余（.onnx）优先 onnxruntime。
-            const bool looks_like_ncnn = opt.model_path.size() > 6 &&
-                                         opt.model_path.compare(opt.model_path.size() - 6, 6,
-                                                                ".param") == 0;
+            //
+            // 格式 → 允许后端 是**严格**的：.onnx 只给 onnxruntime，.param 只给 ncnn。
+            // 以前是"按扩展名排个序，找不到就换另一个试试"，结果 .onnx 会被交给
+            // ncnn 去 load_param、报一个误导性的 RuntimeError；而且 docs/09 承诺的
+            // "没有 ORT 时返回 Unsupported" 也不成立。
+            const auto ends_with_ci = [](const std::string& s, const char* suffix) {
+                const std::size_t n = std::strlen(suffix);
+                if (s.size() < n) return false;
+                for (std::size_t i = 0; i < n; ++i) {
+                    const unsigned char a =
+                        static_cast<unsigned char>(s[s.size() - n + i]);
+                    const unsigned char b = static_cast<unsigned char>(suffix[i]);
+                    if (std::tolower(a) != std::tolower(b)) return false;
+                }
+                return true;
+            };
 
-            const char* order_normal[] = {"onnxruntime", "ncnn"};
-            const char* order_ncnn[]   = {"ncnn", "onnxruntime"};
-            const char** order = looks_like_ncnn ? order_ncnn : order_normal;
-
-            for (int i = 0; i < 2; ++i) {
-                if (has_backend(order[i])) {
-                    chosen = order[i];
-                    break;
+            if (ends_with_ci(opt.model_path, ".onnx")) {
+                if (!has_backend("onnxruntime")) {
+                    return Status(Errc::Unsupported,
+                                  "模型是 .onnx，但当前构建没有 onnxruntime 后端"
+                                  "（编译期后端: " +
+                                      std::string(build_backend()) +
+                                      "）。onnxruntime 不会回退到 ncnn/stub。");
+                }
+                chosen = "onnxruntime";
+            } else if (ends_with_ci(opt.model_path, ".param")) {
+                if (!has_backend("ncnn")) {
+                    return Status(Errc::Unsupported,
+                                  "模型是 ncnn .param，但当前构建没有 ncnn 后端"
+                                  "（编译期后端: " +
+                                      std::string(build_backend()) + "）。");
+                }
+                chosen = "ncnn";
+            } else {
+                // 扩展名不认识：保持旧行为，谁注册了就按优先级试谁。
+                const char* order[] = {"onnxruntime", "ncnn"};
+                for (const char* name : order) {
+                    if (has_backend(name)) {
+                        chosen = name;
+                        break;
+                    }
                 }
             }
             if (chosen.empty()) {

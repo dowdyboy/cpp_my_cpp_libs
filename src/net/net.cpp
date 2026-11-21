@@ -189,10 +189,11 @@ struct AddrInfo {
     int              family = AF_UNSPEC;
 };
 
-/// getaddrinfo 包装：passive = 用于 bind（host 为空表示任意地址）
-Result<std::vector<AddrInfo>> resolve(const Endpoint& ep, bool passive, int socktype) {
+/// getaddrinfo 的具体实现；family 传 AF_UNSPEC 时由系统决定地址顺序。
+Result<std::vector<AddrInfo>> resolve_family(const Endpoint& ep, bool passive, int socktype,
+                                             int family) {
     addrinfo h{};
-    h.ai_family   = AF_UNSPEC;
+    h.ai_family   = family;
     h.ai_socktype = socktype;
     if (passive) h.ai_flags |= AI_PASSIVE;
 
@@ -226,6 +227,34 @@ Result<std::vector<AddrInfo>> resolve(const Endpoint& ep, bool passive, int sock
         return Status(Errc::InvalidArgument, "地址解析结果为空: " + ep.host);
     }
     return out;
+}
+
+/// getaddrinfo 包装：passive = 用于 bind（host 为空表示任意地址）。
+///
+/// **空 host 的 IPv4 优先**：Windows 上 getaddrinfo(AI_PASSIVE, AF_UNSPEC) 会把 "::"
+/// 排在前面，而 IPV6_V6ONLY 默认是 1 —— 直接按第一个结果 bind 只会监听 IPv6，
+/// IPv4 连 127.0.0.1 都会失败，和头文件"空 host = INADDR_ANY"的承诺不符。
+/// 因此空 host + passive 先按 AF_INET 解析（0.0.0.0），失败才退回 AF_UNSPEC
+/// （极少见：系统没有 IPv4 协议栈）。想监听 IPv6/双栈必须显式传 "::"。
+Result<std::vector<AddrInfo>> resolve(const Endpoint& ep, bool passive, int socktype) {
+    if (passive && ep.host.empty()) {
+        auto v4 = resolve_family(ep, passive, socktype, AF_INET);
+        if (v4) return v4;
+    }
+    return resolve_family(ep, passive, socktype, AF_UNSPEC);
+}
+
+/// 显式绑定 IPv6 地址时，尽力清掉 IPV6_V6ONLY（Windows 默认 1 = 只收 IPv6），
+/// 让 "::" 成为双栈。失败不致命：保持平台默认，至少 IPv6 仍然可用。
+void try_dual_stack(native_t fd, int family) {
+#if defined(IPV6_V6ONLY)
+    if (family != AF_INET6) return;
+    const int zero = 0;
+    ::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&zero), sizeof(zero));
+#else
+    (void)fd;
+    (void)family;
+#endif
 }
 
 uint16_t port_of(const sockaddr_storage& addr) {
@@ -659,6 +688,9 @@ Result<TcpListener> TcpListener::bind(const Endpoint& ep, int backlog, bool reus
             continue;
         }
         no_sigpipe(fd);
+        // 空 host 已在 resolve() 里固定成 IPv4；显式传 "::" 时才走这里，
+        // 尽力把 IPv6 socket 变成双栈（Windows 默认 IPV6_V6ONLY=1）。
+        try_dual_stack(fd, a.family);
         if (reuse_addr) {
             int one = 1;
             ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one),
@@ -745,6 +777,9 @@ Result<UdpSocket> UdpSocket::bind(const Endpoint& ep) {
             last_err = MYLIB_SOCK_ERRNO();
             continue;
         }
+        // 与 TCP 一致：空 host 在 resolve() 里已经固定成 IPv4；只有显式 "::"
+        // 才会到这里，尽力关掉 IPV6_V6ONLY 得到双栈。
+        try_dual_stack(fd, a.family);
         if (::bind(fd, reinterpret_cast<const sockaddr*>(&a.addr), a.len) != 0) {
             last_err = MYLIB_SOCK_ERRNO();
             close_fd(fd);
@@ -890,33 +925,67 @@ Result<Datagram> UdpSocket::recv_from(std::size_t max_size) {
 
     Datagram         d;
     sockaddr_storage ss{};
-    socklen_t        len = sizeof(ss);
-    const native_t   fd  = static_cast<native_t>(fd_);
+    const native_t   fd = static_cast<native_t>(fd_);
     d.data.resize(max_size);
 
-    for (;;) {
 #if defined(_WIN32)
-        const int rc = ::recvfrom(fd, reinterpret_cast<char*>(d.data.data()),
-                                  static_cast<int>(max_size), 0,
-                                  reinterpret_cast<sockaddr*>(&ss), &len);
+    for (;;) {
+        socklen_t  len = sizeof(ss);
+        const int  rc  = ::recvfrom(fd, reinterpret_cast<char*>(d.data.data()),
+                                    static_cast<int>(max_size), 0,
+                                    reinterpret_cast<sockaddr*>(&ss), &len);
         if (rc == SOCKET_ERROR) {
-            if (MYLIB_INTERRUPTED(MYLIB_SOCK_ERRNO())) continue;
+            const int e = MYLIB_SOCK_ERRNO();
+            if (MYLIB_INTERRUPTED(e)) continue;
+            // UDP 缓冲不够时 Winsock 返回 WSAEMSGSIZE，并且数据报已被消费（多余部分丢失）。
+            // 与 POSIX 分支保持同一个错误码：不交付截断数据，调用方调大 max_size。
+            if (e == WSAEMSGSIZE) {
+                return Status(Errc::OutOfRange,
+                              "UDP 数据报超过 max_size=" + std::to_string(max_size) +
+                                  "（WSAEMSGSIZE：真实长度不可知，数据报已被丢弃；请增大 max_size）");
+            }
             return sock_status("recvfrom");
         }
-#else
-        len = sizeof(ss);  // recvfrom 会改写 len，重试前恢复
-        const ssize_t rc = ::recvfrom(fd, d.data.data(), max_size, 0,
-                                      reinterpret_cast<sockaddr*>(&ss), &len);
-        if (rc < 0) {
-            if (MYLIB_INTERRUPTED(MYLIB_SOCK_ERRNO())) continue;
-            return sock_status("recvfrom");
-        }
-#endif
         d.data.resize(static_cast<std::size_t>(rc));
         d.from.host = ip_of(ss);
         d.from.port = port_of(ss);
         return d;
     }
+#else
+    for (;;) {
+        iovec  iov{};
+        iov.iov_base = d.data.data();
+        iov.iov_len  = max_size;
+        msghdr msg{};
+        msg.msg_name    = &ss;
+        msg.msg_namelen = sizeof(ss);
+        msg.msg_iov     = &iov;
+        msg.msg_iovlen  = 1;
+        // MSG_TRUNC：数据报比 buffer 长时也返回**真实长度**（否则内核静默截断、
+        // 返回 max_size，调用方会把半条报文当成完整数据报）。
+        const ssize_t rc = ::recvmsg(fd, &msg, MSG_TRUNC);
+        if (rc < 0) {
+            if (MYLIB_INTERRUPTED(MYLIB_SOCK_ERRNO())) continue;
+            return sock_status("recvmsg");
+        }
+        const std::size_t real      = static_cast<std::size_t>(rc);
+        const bool        truncated = real > max_size || (msg.msg_flags & MSG_TRUNC) != 0;
+        if (truncated) {
+            const std::string real_text =
+                real > max_size ? std::to_string(real) + " 字节"
+                                : std::string(">") + std::to_string(max_size) +
+                                      " 字节（当前平台未给出精确长度）";
+            return Status(Errc::OutOfRange,
+                          "UDP 数据报被截断: 实际 " + real_text +
+                              " > max_size=" + std::to_string(max_size) +
+                              "（不交付截断数据，数据报已丢弃；请增大 max_size）");
+        }
+        d.data.resize(real);
+        d.from.host = ip_of(ss);
+        d.from.port = port_of(ss);
+        return d;
+    }
+#endif
 }
 
 std::uint16_t UdpSocket::port() const {

@@ -23,7 +23,8 @@
       "cacheVariables": {
         "MYLIB_ENABLE_NCNN": "ON",
         "MYLIB_ENABLE_CV": "ON"
-      }
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
     },
     {
       "name": "win-mingw",
@@ -65,7 +66,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_MAKE_PROGRAM": "D:/ProgramFiles/ninja-win/ninja.exe"
-      }
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
     },
     {
       "name": "linux-armv7",
@@ -77,7 +79,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_MAKE_PROGRAM": "D:/ProgramFiles/ninja-win/ninja.exe"
-      }
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
     },
     {
       "name": "linux-armv7-static",
@@ -94,7 +97,8 @@
         "MYLIB_ENABLE_NCNN": "ON",
         "MYLIB_BUILD_EXAMPLES": "OFF",
         "CMAKE_EXE_LINKER_FLAGS": "-static"
-      }
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
     },
     {
       "name": "linux-armv7-sdk2020",
@@ -128,7 +132,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_MAKE_PROGRAM": "D:/ProgramFiles/ninja-win/ninja.exe"
-      }
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
     },
     {
       "name": "linux-aarch64-cross",

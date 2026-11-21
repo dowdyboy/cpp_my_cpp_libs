@@ -73,7 +73,10 @@ public:
 
     /// 加载模型。
     /// @param onnx_path   .onnx 路径
-    /// @param sidecar     .json 路径；留空则自动找同名 .json
+    /// @param sidecar     .json 路径；留空则自动找同名 .json。
+    ///        显式给出但文件不存在时返回 Errc::NotFound；自动推导的 .json 缺失
+    ///        视为"没有 sidecar"（模型维度必须静态）。
+    ///        sidecar 解析失败（格式/字段类型错误）返回 Errc::ParseError，不会抛异常。
     ///
     /// 没有 sidecar 也能用（类别名/特征名缺失），但特征数必须是静态的。
     ///

@@ -130,9 +130,10 @@ Result<VecXd> least_squares(const MatXd& A, const VecXd& b) {
         return Status(Errc::InvalidArgument, "右端向量维度与矩阵不匹配");
     }
     // 注意：这里必须用 matrix_all_finite，不能写 all_finite(A)。
-    // all_finite 的形参是 Eigen::Ref<const VecXd>（向量），拿矩阵去匹配会在
-    // 带断言的构建里直接触发 Eigen 的 rows()==1||cols()==1 断言，而在
-    // Release（NDEBUG）下只是"碰巧"按连续内存展平读对了 —— 两类构建行为不一致。
+    // all_finite 的形参是 Eigen::Ref<const VecXd>（向量）：拿矩阵去匹配在
+    // 带断言的构建里会触发 Eigen 的 rows()==1||cols()==1 断言；Release（NDEBUG）
+    // 下更危险 —— 它会把矩阵当"长度 rows() 的向量"处理，**只扫第一列**，
+    // 第二列以后的 NaN 会被静默放过（实测 4×4 的 NaN 在 (3,3) 返回 true）。
     if (!matrix_all_finite(A) || !all_finite(b)) {
         return Status(Errc::InvalidArgument, "least_squares 输入包含非有限值");
     }

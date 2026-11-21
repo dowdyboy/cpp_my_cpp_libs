@@ -120,6 +120,27 @@ bool        ThreadPool::stopping() const noexcept { return stopping_.load(); }
 // =============================================================================
 //  PeriodicTask
 // =============================================================================
+//  生命周期按"状态与对象分离"设计：
+//    * 线程 lambda 只捕获 shared_ptr<State>，**不捕获 this** —— 回调里销毁任务后，
+//      loop() 继续用的只有 State，不会访问已释放的 PeriodicTask（原来的 UAF）；
+//    * join/detach 全部由 join_mutex_ 串行化：两个外部线程同时 stop() 时只有
+//      一个能拿到 joinable 的 thread_，另一个等它 join 完后看到 !joinable；
+//    * "是不是在回调线程里"用 State 里登记的 thread_id_ 判断，而不是先拿
+//      join_mutex_ 再看 thread_.get_id() —— 外部线程可能正持锁 join 本线程，
+//      回调线程再去等锁就是互相等死。
+struct PeriodicTask::State {
+    std::chrono::milliseconds  period_{0};
+    std::function<void()>      fn_;
+    std::mutex                 mutex_;
+    std::condition_variable    cv_;
+    std::atomic<bool>          stop_{false};
+    std::atomic<bool>          in_loop_{false};
+    std::atomic<std::uint64_t> ticks_{0};
+    std::atomic<std::uint64_t> errors_{0};
+    /// 周期线程自己的 id：stop() 据此判断"是不是在回调线程里"
+    std::thread::id            thread_id_{};
+};
+
 Result<std::unique_ptr<PeriodicTask>> PeriodicTask::create(std::chrono::milliseconds period,
                                                            std::function<void()>  fn,
                                                            bool run_immediately) {
@@ -127,27 +148,32 @@ Result<std::unique_ptr<PeriodicTask>> PeriodicTask::create(std::chrono::millisec
     if (!fn) return Status(Errc::InvalidArgument, "回调为空");
 
     std::unique_ptr<PeriodicTask> task(new PeriodicTask());
-    task->period_ = period;
-    task->fn_     = std::move(fn);
+    auto state     = std::make_shared<State>();
+    state->period_ = period;
+    state->fn_     = std::move(fn);
+    task->state_   = state;
 
     std::promise<void> ready;
     auto               ready_future = ready.get_future();
     try {
-        task->thread_ = std::thread([p = task.get(), &ready, run_immediately] {
-            p->in_loop_.store(true);
+        task->thread_ = std::thread([state, &ready, run_immediately] {
+            // 先登记线程 id 并回报就绪，再跑回调：create() 返回前已经 wait 过
+            // ready_future，之后任何 stop() 都能安全地看到 thread_id_。
+            state->thread_id_ = std::this_thread::get_id();
+            state->in_loop_.store(true);
             try {
                 ready.set_value();
             } catch (...) {
             }
             if (run_immediately) {
                 try {
-                    p->fn_();
-                    p->ticks_.fetch_add(1);
+                    state->fn_();
+                    state->ticks_.fetch_add(1);
                 } catch (...) {
-                    p->errors_.fetch_add(1);
+                    state->errors_.fetch_add(1);
                 }
             }
-            p->loop();
+            loop(state);
         });
     } catch (const std::exception& e) {
         return Status(Errc::RuntimeError, std::string("创建周期任务失败: ") + e.what());
@@ -157,57 +183,72 @@ Result<std::unique_ptr<PeriodicTask>> PeriodicTask::create(std::chrono::millisec
 }
 
 PeriodicTask::~PeriodicTask() {
+    // stop() 负责两种收尾：普通线程里 join；回调线程里置停止标志并 detach。
+    // 这样析构返回后 thread_ 一定不是 joinable（不会 terminate），
+    // 而 detach 出去的线程由 State 的 shared_ptr 保活到 loop() 退出。
     stop();
-    if (thread_.joinable()) {
-        // 只有"在回调里销毁自己"才会走到这里（这种用法本身不合法）。
-        // terminate 太狠，退化成 detach，并把禁止事项写进头文件注释。
-        thread_.detach();
-    }
 }
 
-void PeriodicTask::loop() {
-    auto next = std::chrono::steady_clock::now() + period_;
-    std::unique_lock<std::mutex> lock(mutex_);
-    while (!stop_.load()) {
-        if (cv_.wait_until(lock, next, [this] { return stop_.load(); })) break;
+void PeriodicTask::loop(const std::shared_ptr<State>& st) {
+    auto next = std::chrono::steady_clock::now() + st->period_;
+    std::unique_lock<std::mutex> lock(st->mutex_);
+    while (!st->stop_.load()) {
+        if (st->cv_.wait_until(lock, next, [&st] { return st->stop_.load(); })) break;
         lock.unlock();
 
         try {
-            fn_();
-            ticks_.fetch_add(1);
+            st->fn_();
+            st->ticks_.fetch_add(1);
         } catch (...) {
-            errors_.fetch_add(1);
+            st->errors_.fetch_add(1);
         }
 
+        // 从这里起一律只用 st，不碰 this —— 回调可能已经把 PeriodicTask 删掉。
         lock.lock();
         // 固定速率：下一次 = 上一次计划 + period。若已经落后太多（任务超时），
         // 直接对齐到 now + period，避免"追补式突发"把 CPU 打满。
-        next += period_;
+        next += st->period_;
         const auto now = std::chrono::steady_clock::now();
-        if (next < now) next = now + period_;
+        if (next < now) next = now + st->period_;
     }
 }
 
 void PeriodicTask::stop() {
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        stop_.store(true);
-    }
-    cv_.notify_all();
+    auto st = state_;
+    if (!st) return;
 
-    if (!thread_.joinable()) return;
-    if (std::this_thread::get_id() == thread_.get_id()) {
-        // 在回调内部调 stop()：不能 join 自己。**也不能 detach** ——
-        // detach 之后对象可能先被销毁而线程还在跑（use-after-free）。
-        // 保持 joinable，交给之后从别的线程来的 stop()/析构去 join。
+    {
+        std::lock_guard<std::mutex> lock(st->mutex_);
+        st->stop_.store(true);
+    }
+    st->cv_.notify_all();
+
+    // 回调线程内调用：不能 join 自己。**也不能阻塞等 join_mutex_** —— 外部线程
+    // 可能正持着它在 join 本线程，等锁就是死锁。用 try_lock 串行化 detach：
+    //   拿到锁 → detach（析构时 std::thread 不会因 joinable 而 terminate）；
+    //   拿不到 → 说明已有别的线程在 join，交给它收尾。
+    if (st->thread_id_ == std::this_thread::get_id()) {
+        std::unique_lock<std::mutex> join_lock(join_mutex_, std::try_to_lock);
+        if (join_lock.owns_lock() && thread_.joinable()) thread_.detach();
         return;
     }
-    thread_.join();
+
+    // 两个外部线程并发 stop()：这里串行化后只有第一个真正 join，
+    // 后来者等它 join 完再看到 !joinable，不会双 join（UB）。
+    std::lock_guard<std::mutex> join_lock(join_mutex_);
+    if (thread_.joinable()) thread_.join();
 }
 
+std::uint64_t PeriodicTask::ticks() const noexcept {
+    return state_ ? state_->ticks_.load() : 0;
+}
 
-std::uint64_t PeriodicTask::ticks() const noexcept { return ticks_.load(); }
-std::uint64_t PeriodicTask::errors() const noexcept { return errors_.load(); }
-bool          PeriodicTask::running() const noexcept { return in_loop_.load() && !stop_.load(); }
+std::uint64_t PeriodicTask::errors() const noexcept {
+    return state_ ? state_->errors_.load() : 0;
+}
+
+bool PeriodicTask::running() const noexcept {
+    return state_ && state_->in_loop_.load() && !state_->stop_.load();
+}
 
 }  // namespace my::thread

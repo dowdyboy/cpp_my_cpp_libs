@@ -63,6 +63,16 @@ $version = $Matches[1]
 if (-not $Tag) { $Tag = "v$version" }
 Info "版本: $version  tag: $Tag  repo: $Repo"
 
+# 发布件必须能从 tag 重建：脏树上打出来的包会在 BUILD-INFO 里带 "-dirty"。
+git -C $root diff-index --quiet HEAD --
+if ($LASTEXITCODE -ne 0) {
+    if ($DryRun) {
+        Write-Host "  [warn] 工作树不干净（dry-run 继续；真正发布会拒绝）" -ForegroundColor Yellow
+    } else {
+        Fail "工作树不干净（git diff-index 非 0）：先提交或 stash，再发布"
+    }
+}
+
 # --------------------------------------------------------------------------- 1. release notes
 if (-not $NotesFile) {
     $text = Get-Content CHANGELOG.md -Encoding UTF8 -Raw
@@ -97,6 +107,29 @@ $gitUrl = "https://x-access-token:$token@github.com/$Repo.git"
 $pushOk = $false
 if (-not $SkipPush) {
     Step "推送 main 与 tag $Tag"
+
+    # 以前这里直接 push refs/tags/$Tag，却从不创建 tag：本地没有 vX.Y.Z 时
+    # git 会报 "src refspec ... does not match any"。这里先确保 tag 存在且指向 HEAD。
+    $head = (git -C $root rev-parse HEAD 2>$null | Select-Object -First 1)
+    if (-not $head) { Fail "读不到 HEAD（当前目录不是 git 仓库？）" }
+    $head = $head.Trim()
+    $localTag = (git -C $root rev-parse -q --verify "refs/tags/$Tag^{commit}" 2>$null | Select-Object -First 1)
+    if ($localTag) { $localTag = $localTag.Trim() }
+
+    if ($DryRun) {
+        if ($localTag) { Info "[dry-run] 本地 tag $Tag 已存在（$localTag）" }
+        else { Info "[dry-run] 将创建 annotated tag $Tag -> $head" }
+    } elseif ($localTag) {
+        if ($localTag -ne $head) {
+            Fail "本地 tag $Tag 指向 $localTag，但 HEAD 是 $head。先删掉旧 tag（git tag -d $Tag）或换版本号"
+        }
+        Info "本地 tag $Tag 已存在并指向 HEAD（$head）"
+    } else {
+        git -C $root tag -a $Tag -m "my_cpp_libs $version"
+        if ($LASTEXITCODE -ne 0) { Fail "git tag -a $Tag 失败（exit=$LASTEXITCODE）" }
+        Info "已创建 annotated tag $Tag -> $head"
+    }
+
     if ($DryRun) {
         Info "[dry-run] git push main + refs/tags/$Tag"
         $pushOk = $true

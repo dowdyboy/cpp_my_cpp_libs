@@ -45,7 +45,7 @@ int main() {
     my::log::Config cfg;
     cfg.level      = my::log::Level::Info;
     cfg.to_console = true;
-    my::log::init(cfg);
+    (void)my::log::init(cfg);
 
     // -------------------------------------------------------------------------
     // 1. TCP 回显
@@ -65,7 +65,7 @@ int main() {
         my::log::error("连接失败: {}", client.status().to_string());
         return 1;
     }
-    client.value().set_timeout(3000);
+    (void)client.value().set_timeout(3000);
     my::log::info("已连接，对端 {}", client.value().peer().to_string());
 
     const std::string msg = "hello from my::net";
@@ -109,7 +109,7 @@ int main() {
         my::log::error("UDP 初始化失败");
         return 1;
     }
-    rx.value().set_timeout(2000);
+    (void)rx.value().set_timeout(2000);
     if (auto st = tx.value().set_broadcast(true); !st) {
         my::log::warn("开广播失败（有些环境不允许）: {}", st.to_string());
     }

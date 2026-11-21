@@ -124,6 +124,27 @@ MYTEST_CASE(net_tcp_echo_roundtrip) {
     CHECK(server.finished.load());
 }
 
+// 空 host 必须是 IPv4 任意地址（0.0.0.0），而不是"系统解析出来的第一个地址"：
+// Windows 上 getaddrinfo(AI_PASSIVE, AF_UNSPEC) 先给 "::" 且 IPV6_V6ONLY 默认 1，
+// 旧实现会只监听 IPv6，127.0.0.1 连不上。这条用例 Windows/Linux 都要过。
+MYTEST_CASE(net_listener_empty_host_accepts_ipv4) {
+    auto l = my::net::TcpListener::bind({"", 0}, 4);
+    CHECK_RESULT(l);
+    CHECK(l.value().port() != 0);
+
+    std::atomic<bool> accepted{false};
+    JoinGuard         peer(std::thread([&] {
+        auto c = l.value().accept(3000);
+        if (c) accepted.store(true);
+    }));
+
+    auto cli = my::net::TcpSocket::connect({"127.0.0.1", l.value().port()}, 3000);
+    if (peer.t.joinable()) peer.t.join();
+    CHECK_RESULT(cli);                      // IPv4 回环能连上
+    CHECK(accepted.load());                 // 服务端真的 accept 到了
+    CHECK_EQ(cli.value().peer().port, l.value().port());
+}
+
 MYTEST_CASE(net_tcp_accept_timeout) {
     auto l = my::net::TcpListener::bind({"127.0.0.1", 0}, 4);
     CHECK_RESULT(l);
@@ -485,6 +506,42 @@ MYTEST_CASE(net_udp_recv_from_rejects_huge_max_size) {
     auto d = s.value().recv_from(65536);
     CHECK(!d);
     CHECK_EQ(d.status().code(), my::Errc::OutOfRange);
+}
+
+// UDP 截断语义：max_size 小于数据报时必须报 OutOfRange，不能静默交付截断数据。
+// 旧实现 POSIX 静默截断、Windows 把 WSAEMSGSIZE 包装成 IoError（还丢包），
+// 两端行为不一致；现在统一成"丢弃数据报 + OutOfRange"。
+MYTEST_CASE(net_udp_recv_from_truncation_reports_out_of_range) {
+    auto a = my::net::UdpSocket::bind({"127.0.0.1", 0});
+    CHECK_RESULT(a);
+    auto b = my::net::UdpSocket::bind({"127.0.0.1", 0});
+    CHECK_RESULT(b);
+    CHECK_OK(a.value().set_timeout(2000));
+    CHECK_OK(b.value().set_timeout(2000));
+
+    const my::net::Bytes payload(100, 0x5A);
+    CHECK_RESULT(a.value().send_to({"127.0.0.1", b.value().port()}, payload.data(), payload.size()));
+
+    // 只给 10 字节缓冲：必须失败且错误码是 OutOfRange（Windows/Linux 一致），
+    // 不能返回一个 10 字节的"半条报文"。
+    auto small = b.value().recv_from(10);
+    CHECK(!small);
+    CHECK_EQ(small.status().code(), my::Errc::OutOfRange);
+#if !defined(_WIN32)
+    // POSIX 用 recvmsg(MSG_TRUNC) 能拿到真实长度：消息里应同时报出 100 和 max_size=10。
+    // Windows 只有 WSAEMSGSIZE，真实长度不可知，因此这个断言只在 POSIX 上做。
+    CHECK(small.status().message().find("100") != std::string::npos);
+    CHECK(small.status().message().find("10") != std::string::npos);
+#endif
+
+    // 截断的那条已经被内核消费、不会留到下一次 recv_from：让 A 重发后用足够大的
+    // 缓冲完整收 100 字节。
+    CHECK_RESULT(a.value().send_to({"127.0.0.1", b.value().port()}, payload.data(), payload.size()));
+    auto full = b.value().recv_from(200);
+    CHECK_RESULT(full);
+    CHECK_EQ(full.value().data.size(), payload.size());
+    CHECK(full.value().data == payload);
+    CHECK_EQ(full.value().from.port, a.value().port());
 }
 
 MYTEST_CASE(net_udp_broadcast_flag) {

@@ -29,7 +29,7 @@ my::http  —— HTTP 客户端 + 服务端（封装 cpp-httplib）           �
 | 非阻塞 | Windows `ioctlsocket(FIONBIO)` / POSIX `fcntl(O_NONBLOCK)` |
 | 收发超时 | Windows `DWORD` 毫秒 / POSIX `timeval` |
 | 连接超时 | `connect()` 非阻塞 + `select` + `SO_ERROR` |
-| 地址解析 | `getaddrinfo`（AF_UNSPEC，优先返回 IPv4），`inet_ntop` 反向 |
+| 地址解析 | `getaddrinfo`（AF_UNSPEC，顺序由系统决定）；**空 host 时本库优先 AF_INET**，否则 Windows 上 `::` + `IPV6_V6ONLY=1` 会只监听 IPv6、IPv4 永远连不上 |
 | IPv6 | `parse_endpoint` 支持 `[::1]:port` 写法 |
 
 引 Asio/libuv 的收益在"事件驱动 + 高并发"，本项目目前是"一条控制链路 + 一路遥测"，
@@ -164,7 +164,8 @@ srv.value().listen();   // 阻塞；stop() 从别的线程停
 2. **端口**：PetaLinux rootfs 里 80/8080 一般不冲突；如果装了 nginx/Apache 先查一下。
 3. **防火墙**：Windows 上第一次起服务端会弹防火墙确认；板端没有这一层。
 4. **超时**：`read_timeout_s` 默认 5 s，慢 handler（比如等 ADC 采集）要相应调大。
-5. **keep-alive**：服务端默认最多 8 个 keep-alive 连接，客户端 httplib 默认复用连接；
+5. **keep-alive**：服务端默认**每个 keep-alive 连接最多 8 个请求**（响应头 `Keep-Alive: max=8`；
+   httplib 的 `keep_alive_max_count` 是"每连接请求数"，不是并发连接数）；客户端 httplib 默认复用连接。
    频繁短连接（每帧一个请求）建议走 keep-alive，省掉三次握手。
 6. **TLS 未启用**：只支持 `http://`；`https://` 会明确返回 `Unsupported`。
    需要 HTTPS 时给 httplib 定义 `CPPHTTPLIB_OPENSSL_SUPPORT` 并链接 OpenSSL/mbedTLS，
@@ -172,16 +173,18 @@ srv.value().listen();   // 阻塞；stop() 从别的线程停
 7. **Windows 的 `SO_REUSEADDR` 语义不同（实测确认）**：POSIX 上 `reuse_addr=true`
    只是允许 TIME_WAIT 期间重绑，**不会**让第二个进程抢同一端口；Windows 上则会让
    第二个 listener 也绑成功 —— 端口冲突检测和劫持防护同时失效。
-   - 需要可靠的"端口已占用"检测时：`TcpListener::bind(ep, backlog, /*reuse_addr=*/false)`。
-   - 想要 Windows 默认就独占端口，得把实现里的 `SO_REUSEADDR` 换成
-     `SO_EXCLUSIVEADDRUSE`（代价是重启时若落在 TIME_WAIT 会绑不上，目前没改，属已知取舍）。
+   - `TcpListener::bind` 默认（`reuse_addr=false`）**不设** `SO_REUSEADDR`，Windows 上
+     就是独占端口，可靠的"端口已占用"检测用它。
+   - `http::Server` 默认在 Windows 上用 `SO_EXCLUSIVEADDRUSE`（`reuse_addr=false`）；
+     只有显式 `reuse_addr=true` 才退化为 `SO_REUSEADDR`（=允许第二个 Server 绑同一端口）。
+   - 代价：独占端口时，重启若落在 TIME_WAIT 可能绑不上；重绑并容忍这一点的场景才开 `reuse_addr`。
 
 ## 7. 测试覆盖（本机回环，不依赖外部网络，板端同样全过）
 
 | 套件 | 用例数 | 覆盖 |
 |---|---|---|
-| `net` | 30 | 地址解析、TCP 回显、accept/connect 超时、对端关闭、**SIGPIPE 不杀进程**、分帧（含超大长度拒绝）、行协议（CRLF/无换行 EOF）、UDP 往返/超时/广播/组播参数校验、**recv_exact 半途断连**、**端口占用**、**1 MiB 大包**、**move 语义** |
-| `http` | 20 | GET/POST、JSON 往返、query/路径参数、未知方法拒绝、自定义 header、404 与错误体、读超时、连接拒绝、stop 释放端口、非法 base_url、**IPv6 字面量端口解析**、**端口严格校验**、**handler 内 stop（死锁回归）**、**并发请求**、未初始化客户端 |
+| `net` | 见 [test-counts](test-counts.md) | 地址解析、TCP 回显、accept/connect 超时、对端关闭、**SIGPIPE 不杀进程**、分帧（含超大长度拒绝）、行协议（CRLF/无换行 EOF）、UDP 往返/超时/广播/组播参数校验、**recv_exact 半途断连**、**端口占用**、**1 MiB 大包**、**move 语义**、**空 host 的 IPv4 可达性**、**UDP 截断返回 OutOfRange** |
+| `http` | 见 [test-counts](test-counts.md) | GET/POST/PUT/DELETE/PATCH/OPTIONS、JSON 往返、query/路径参数、未知方法拒绝、自定义 header/响应头、404 与错误体、413、handler 异常→500、读超时、连接拒绝、stop 释放端口、非法 base_url、**IPv6 字面量端口解析**、**端口严格校验**、**handler 内 stop（死锁回归）**、**并发请求**、未初始化客户端 |
 
 ```bash
 ctest --preset win-mingw -R "net_|http_" --output-on-failure
@@ -195,4 +198,4 @@ ctest --preset win-mingw -R "net_|http_" --output-on-failure
 | WebSocket | httplib 自带 `WebSocket` 支持（同一头文件），需要时加 `my::http::WsServer/Client` |
 | 高并发/事件驱动 | 换 Asio standalone（接口不变，`my::net` 内部替换） |
 | 代理/重定向 | httplib 有 `set_proxy`/`set_follow_location`，按需暴露 |
-| ~~板端实测~~ | ✅ **已完成（2026-11-16）**：`net` 15/15、`http` 11/11 通过；`example_net` 36 ms、`example_http` 141 ms |
+| ~~板端实测~~ | ✅ **已完成（2026-11-16）**：`net` / `http` 全部用例通过（当时 15/15、11/11；当前条数见 [test-counts](test-counts.md)）；`example_net` 36 ms、`example_http` 141 ms |

@@ -1,6 +1,68 @@
 # 变更记录
 
-## 未发布（基于 0.1.9）—— 第三轮巡检的 A 级与 B 级契约修复
+## 未发布（基于 0.1.9）—— 第三/四轮巡检的 A 级与 B 级修复
+
+### 第四轮巡检 Tier 0（2026-11-21）
+
+这一轮把 `assess/audit-2026-11-21.md` 里的 **13 条 A 级**、测试安全网和发布链一次修完
+（只保留 B/C 级长尾，见该报告 §3/§4）：
+
+1. **JSON 深度与数值边界**：`Document::parse` 在进入 nlohmann 前做词法深度扫描
+   （`kMaxNestingDepth=256`，正确跳过字符串/转义），15000 层 `[` 现在返回 `ParseError`
+   而不是 0xC00000FD 栈溢出；`merge_into` 的递归也有同样兜底。`get<T>` 对整型做
+   范围/整值检查：`get<unsigned short>(70000)`、`get<int>(2^32)`、`get<int>(1e300)`、
+   `get<int>(1.9)` 全部返回 `ParseError`，不再静默回绕/UB。
+2. **dsp 非有限输入**：`welch` / `analyze` / `demod_am|fm|ask|fsk|bpsk` 入口统一
+   `isfinite` 检查（O(N)），返回 `InvalidArgument` 并带第一个非法下标；`detect_bursts`
+   保持裸 vector 签名，非有限输入返回空表并在头文件写明。单个 NaN 不再换来
+   `classify=noise, confidence=1.000` / 8065 段假突发。
+3. **net 地址族与 UDP 截断**：空 host 的 passive 解析优先 `AF_INET`（Windows 上
+   `bind({"",0})` 的 IPv4 现在可达；要 IPv6/双栈显式传 `"::"`，并尽力设
+   `IPV6_V6ONLY=0`）；POSIX `recv_from` 改用 `recvmsg(MSG_TRUNC)` 拿真实长度、
+   Windows 把 `WSAEMSGSIZE` 映射成同一个 `Errc::OutOfRange`，不再"平台 A 报错、
+   平台 B 静默交付半条报文"。
+4. **`PeriodicTask` 生命周期**：状态收进 `shared_ptr<State>`，线程不再捕获 `this`；
+   `join_mutex_` 串行化 `joinable/join/detach`，并发 `stop()` 不会双 join；回调线程内
+   销毁任务只置停止标志并 detach，State 保活到线程退出（原实现是 UAF）。
+5. **`Result<T>` 禁止 Ok 构造**：`Result(Status)` 检查 `status.ok()`，命中即打印一行
+   线索后 abort，消灭"`ok()==false` 但 `status().ok()==true`"的非法对象。
+6. **serial POSIX 挂断**：`read_some` 检查 `POLLERR/POLLHUP/POLLNVAL`，`read()==0`
+   映射 `IoError`（不再是 Ok/0 让调用方 100% CPU 空转）；PTY 对端关闭用例在 Linux 实跑。
+7. **log 异步 flush**：先取 logger/pool 再出锁，异步模式等待 `queue_size()==0`
+   （最多 2s，best effort），20 万行 + flush 后立即退出不再丢尾行。
+8. **ml sidecar**：`load_sidecar` 全量 try/catch + `is_array/is_object/is_string`
+   校验（畸形 `name:123` 返回 `ParseError`，不再抛 nlohmann 异常）；显式指定的
+   sidecar 不存在返回 `NotFound`（自动推导缺失仍允许）。
+9. **cv 深度**：`cv::prepare` 拒绝非 `CV_8U` 输入（16U/32F 不再被饱和/错读），
+   `load` 文档写明只保证 8U。
+10. **infer 后端选择**：格式→后端严格匹配（`.onnx` 只试 ORT、`.param` 只试 ncnn），
+    不匹配直接 `Unsupported`，不再把 `.onnx` 交给 ncnn 产生误导性 `RuntimeError`。
+11. **测试安全网**：`failures()/skips()` 改 atomic；子线程断言会置 `thread_failure`
+    并由主线程转成失败；新增 `--min-suite=name:N` 与 `tests/CMakeLists.txt` 的每套件
+    下限（整套 `test_*.cpp` 掉出 `_test_sources` 时不再全绿）；崩溃处理器改用
+    `write(2)`；`cross` job 的架构校验从"打印"变成 `file`/`readelf` 断言。
+12. **发布/部署链**：包内新增 `BUILD-INFO.txt`（commit/编译器/target/组件）；
+    `.git/refs/heads/*` + `.git/index` 计入 configure 依赖（BuildInfo 不再滞后）；
+    `package-all.ps1` 脏树直接失败（`-AllowDirty` 逃生）、干净 clone 自动建日志目录；
+    `release.ps1` 自动创建 annotated tag 并校验指向 HEAD；`verify-package.ps1` 校验
+    `BUILD-INFO` 与 `-StrictCommit`；Windows 专用 preset 补 `condition`；
+    `deploy-and-bench.ps1` 默认改 `linux-armv7-static`，显式 `::` 时不再拷需要 GLIBC_2.38
+    的 ORT 1.23.2，优先用 petalinux2020 的 1.18.1；补 `examples/15_serial_demo`。
+13. **用例数单一来源**：新增 `tools/gen_test_counts.py`，从 `mylib_tests --list` 生成
+    `docs/test-counts.md`，`linux-cv` job 里 `--check`；README/docs 里的手写数字同步到
+    Tier 0 后的值（382 全组件 / 370 无 cv / 184 noex）。
+
+**验证**：
+
+| 配置 | 结果 |
+|---|---|
+| MinGW x64 Release（clean build） | **372/372 CTest 通过**（370 用例 + 2 守卫），0 告警 |
+| MSVC x64 Release（ORT+OpenCV+ncnn） | **384/384 通过**（382 用例 + 2 守卫） |
+| `-fno-exceptions` 子集 | **186/186 通过**（184 用例 + 2 守卫） |
+| WSL Ubuntu 24.04（serial PTY） | serial 19/19 通过（含 `serial_pty_peer_close_reports_io_error`） |
+| 关键探针 | 15000 层 JSON → ParseError；`bind({"",0})` IPv4 可达；UDP 100B/`recv_from(10)` → OutOfRange；NaN 正弦 → InvalidArgument；`get<unsigned short>(70000)` → ParseError |
+
+### 第三轮巡检（2026-11-20）
 
 这一轮先把审计里的 A 级问题全部修掉（问题清单与证据见 `assess/audit-2026-11-20.md`）：
 

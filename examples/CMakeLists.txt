@@ -124,3 +124,9 @@ if(TARGET mylib_log AND TARGET mylib_json AND TARGET mylib_io AND TARGET mylib_t
     mylib_add_example(example_app_skeleton SOURCES 16_app_skeleton/main.cpp
         LINK mylib_log mylib_json mylib_io mylib_time mylib_thread mylib_core)
 endif()
+
+# 串口：枚举 -> 打开 -> 一次带超时的读。不向未知设备写数据，所以没有 log 依赖。
+if(TARGET mylib_serial)
+    mylib_add_example(example_serial SOURCES 15_serial_demo/main.cpp
+        LINK mylib_serial mylib_core)
+endif()

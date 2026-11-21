@@ -57,12 +57,12 @@
 #  include "my_cpp_libs/net/net.hpp"
 #endif
 
-// http 组件（客户端+服务端，封装 cpp-httplib）
 // serial 组件（Windows COM / Linux termios）
 #if defined(MYLIB_ENABLE_SERIAL_COMPONENT)
 #  include "my_cpp_libs/serial/serial.hpp"
 #endif
 
+// http 组件（客户端+服务端，封装 cpp-httplib）
 #if defined(MYLIB_ENABLE_HTTP_COMPONENT)
 #  include "my_cpp_libs/http/http.hpp"
 #endif

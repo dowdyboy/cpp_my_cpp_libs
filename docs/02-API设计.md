@@ -43,17 +43,26 @@ auto m = r.map([](int x) { return x * 2; });   // 失败会原样传递
 
 | Errc | 场景 |
 |---|---|
+| `Ok` | 成功（`Status{}` / `my::Ok()`；**不要**把它塞进 `Result<T>`，见下） |
 | `InvalidArgument` | 参数非法、维度不匹配、路径语法错误 |
+| `OutOfRange` | 合法类型但数值/尺寸超出上限（如超大画布、稀疏下标） |
 | `NotFound` | 文件/键/路径不存在 |
-| `IoError` | 打开/读写文件失败 |
-| `ParseError` | JSON 解析失败、类型转换失败 |
+| `AlreadyExists` | 创建已存在（如 `copy_file(overwrite=false)`） |
+| `IoError` | 打开/读写文件、socket 失败 |
+| `ParseError` | JSON 解析失败、类型转换/范围检查失败 |
 | `Unsupported` | 平台不支持（如 armv7 上要 onnxruntime） |
 | `NotInitialized` | 需要先 init |
+| `Busy` | 资源被占用 |
 | `RuntimeError` | 运行期失败（模型加载失败、矩阵奇异） |
+| `Cancelled` | 操作被取消 |
+| `Timeout` | 超时（连接、读写、等待） |
+| `Unknown` | 兜底 |
 
 > `value()` 在失败状态被调用时会先往 stderr 打一行
 > `[my_cpp_libs] Result<T>::value() 在失败状态被调用: <code>: <message>`，然后 `abort()`。
 > 嵌入式上"莫名重启"至少能留下一条线索；测试里请用 `CHECK_OK_VALUE` 而不是裸 `.value()`。
+> `Result<T>` 只能由**失败**的 `Status` 构造：`return my::Ok();` 在 `Result<T>` 函数里会
+> 触发断言/abort（Ok 不是失败值），要返回成功请直接 `return value;`。
 
 ### BuildInfo
 
@@ -186,10 +195,28 @@ auto keys = doc.keys("server");
 
 ```cpp
 auto doc = my::json::Document::parse_file("config.json");
-if (!doc) { /* IoError 或 ParseError */ }
+if (!doc) {
+    // IoError 或 ParseError：这里必须 return/处理；继续 doc.value() 会 abort
+    return doc.status();
+}
 
-doc.value().save_file("config.json", /*indent=*/2);
+if (auto st = doc.value().save_file("config.json", /*indent=*/2); !st) {
+    // 也可以改用 my::io::write_file(path, doc.dump(2)) 拿到原子写
+    return st;
+}
 ```
+
+> `get<T>` 对整型 `T` 做范围检查：越界（如 `get<unsigned short>(70000)`）、负数转无符号、
+> 非整值的浮点（如 `get<int>(1.9)`）都返回 `ParseError`，**不静默截断/回绕**；错误消息带
+> 路径、实际值和可接受范围。浮点 `T`（如 `get<double>`）接受整数与浮点。
+
+### 安全上限
+
+`Document::parse` / `parse_file` 在进入 nlohmann 前先做词法扫描，嵌套深度上限
+`my::json::kMaxNestingDepth = 256`（字符串内的 `[` / `{` 和转义字符不计入）；超限返回
+`ParseError`，避免深层数组/对象让递归解析器爆栈。`merge_into` 对深合并递归深度有同样的
+兜底上限（超出返回 `RuntimeError`）。通过 `Document(Json)` 或 `raw()` 这个逃生舱外部塞入的
+Json 不受 parse 的限制，深结构需调用方自行保证。
 
 ### 结构体映射（沿用 nlohmann 的宏）
 
@@ -257,7 +284,7 @@ Vec3d t  = transform_translation(T);
 
 ```cpp
 auto x = solve(A, b);            // Result<VecXd>：非方阵/奇异/NaN 都会报错
-auto c = least_squares(A, b);    // Result<VecXd>：秩亏会报错
+auto c = least_squares(A, b);    // Result<VecXd>：**精确**秩亏会报错；近共线仍需看 condition_number
 double k = condition_number(A);
 ```
 
@@ -270,13 +297,15 @@ auto smooth = moving_average(v, 15);
 ```
 
 > `median(v)` 传值（内部拷贝），不改调用方数据；零拷贝用 `median_inplace(v)`。
+> `standard_deviation()` 是**样本标准差（除以 n-1）**，n=1 时返回 0；
+> `moving_average()` 的偶数窗口取左偏窗 `[i-half, i+half-1]`，两端用缩短窗。
 
 ### 与原生 Eigen 的对照
 
 | 需求 | 原生 | 封装 |
 |---|---|---|
 | 欧拉角→矩阵 | 三个 `AngleAxisd` 连乘 | `rotation_zyx()`，且指定了旋转顺序 |
-| 反解欧拉角 | `eulerAngles()` 顺序易错、万向锁返回 NaN | `euler_zyx()`，闭式解 + 万向锁分支 |
+| 反解欧拉角 | `eulerAngles()` 顺序易错、万向锁附近不是唯一解（返回的是有限值，不是 NaN） | `euler_zyx()`，闭式解 + 万向锁分支 |
 | 求解方程 | `A.partialPivLu().solve(b)`，奇异时返回垃圾值 | `solve()` 返回 `RuntimeError` |
 | 定长类型进容器 | 必须记得 `aligned_allocator` | `AlignedVector<T>` |
 

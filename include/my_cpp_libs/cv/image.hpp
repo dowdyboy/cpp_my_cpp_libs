@@ -30,7 +30,11 @@ using Image = ::cv::Mat;
 // -----------------------------------------------------------------------------
 //  文件 IO
 // -----------------------------------------------------------------------------
-/// 读图失败会给出原因（文件不存在 / 格式不支持），而不是返回一个空 Mat
+/// 读图失败会给出原因（文件不存在 / 格式不支持），而不是返回一个空 Mat。
+///
+/// 注意：本函数只保证默认 flags 下返回 **8U** 图像（IMREAD_COLOR/IMREAD_GRAYSCALE 都是 8U）。
+/// 传 IMREAD_UNCHANGED 时可能得到 16U/32F 图；prepare() 不接受非 8U 输入，
+/// 这类图需要调用方先 convertTo(CV_8U) 再交给预处理。
 Result<Image> load(const std::string& path, int flags = ::cv::IMREAD_COLOR);
 
 Status save(const std::string& path, const Image& image);
@@ -78,6 +82,8 @@ struct PreparedImage {
     my::infer::Shape shape;
 };
 
+/// 一次完成 resize/letterbox -> 颜色转换 -> 归一化 -> HWC->CHW。
+/// @note 只接受 CV_8U 图像；其他深度返回 Errc::Unsupported（不做隐式饱和转换）。
 Result<PreparedImage> prepare(const Image& src, const PreprocessSpec& spec);
 
 Result<PreparedImage> prepare_file(const std::string& path, const PreprocessSpec& spec);

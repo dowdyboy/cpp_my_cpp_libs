@@ -11,12 +11,16 @@
 //
 //  设计约定：
 //    * 采样率一律用 Hz 显式传入，不搞全局状态；
-//    * 实信号用 float，复基带用 std::complex<float>，不做 double 内部转换；
+//    * 接口用 float，复基带用 std::complex<float>；内部累加/相位/频率用 double，
+//      避免长 FFT 与大量样本累加时的精度损失；
 //    * **不假设有模数转换板**：API 只吃数组，接 ADC / 文件 / 网口由调用方决定；
-//    * 解调是"批处理"的：一次给一段，够简单够可测。流式分块留到后面。
+//    * 解调仍是"批处理"的：一次给一段；滤波/混频/抽取/AGC 已提供流式类（见 stream.hpp）；
+//    * **输入必须全部有限**：NaN/Inf 会污染 FFT/滤波器状态，并让分类器给出自信的错误结论。
+//      welch/analyze/demod_* 违规时返回 Errc::InvalidArgument（消息带第一个非法样本下标）；
+//      detect_bursts 返回裸 vector，没有 Status 通道，违规时返回空表。
 //
 //  能力边界（v1，别指望它当 GNU Radio 用）：
-//    * 已实现：频谱/PSD、FIR/IIR 滤波、混频、抽取、突发检测、
+//    * 已实现：频谱/PSD、CFAR 检测（CA/OS）、FIR/IIR 滤波、混频、抽取、突发检测、
 //      调制识别（规则分类器）、AM/FM/ASK/FSK/BPSK 解调；
 //    * **未实现**：QAM/OFDM、信道编码、载波+定时联合恢复的最优实现、
 //      多信号分离、盲均衡。需要这些时再引 liquid-dsp（见 docs/08）。
@@ -72,6 +76,7 @@ struct Spectrum {
 
 /// Welch 平均周期图。overlap ∈ [0,1)，nfft 建议取 2 的幂（pocketfft 会处理任意长度，
 /// 但非 2 幂明显慢）。
+/// 输入 x 必须全部有限，否则返回 Errc::InvalidArgument（消息带第一个非法样本下标）。
 MYLIB_API Result<Spectrum> welch(const Samples& x, double sample_rate, std::size_t nfft,
                                  float overlap = 0.5f, Window window = Window::Hann);
 
@@ -205,6 +210,9 @@ struct Burst {
 /// @param window      滑窗长度（样本），建议 >= 1 个符号周期
 /// @param threshold_db 高出噪声底多少 dB 算"有信号"
 /// @param min_len     短于它的段丢弃（**边界细化后的真实样本数**）；0 表示按 window 的一半
+///
+/// 输入必须全部有限。本函数返回裸 vector、没有 Status 通道：遇到非有限输入时返回空表
+/// （而不是让 NaN 参与前缀和/分位数算出成百上千个假突发）；正常参数错误也返回空表。
 MYLIB_API std::vector<Burst> detect_bursts(const Samples& x, std::size_t window,
                                            float threshold_db = 10.0f, std::size_t min_len = 0);
 
@@ -231,6 +239,7 @@ struct Features {
     double spectral_symmetry = 0.0;  ///< 谱关于峰对称性 [0,1]
 };
 
+/// 输入 x 必须全部有限，否则返回 Errc::InvalidArgument（消息带第一个非法样本下标）。
 MYLIB_API Result<Features> analyze(const Samples& x, double sample_rate);
 
 enum class Modulation { Unknown, Noise, CW, AM, ASK, FM, FSK, PSK };
@@ -250,6 +259,9 @@ MYLIB_API Classification classify(const Features& f);
 // =============================================================================
 //  解调
 // =============================================================================
+/// 共同前置条件：输入样本必须全部有限，否则返回 Errc::InvalidArgument
+/// （消息带第一个非法样本下标）。NaN/Inf 会污染滤波器状态，且不会自行恢复。
+///
 /// AM：包络检波 + 去直流 + 低通（audio_cutoff_hz 必须 < fs/2；0 表示 fs/200，负数报错）
 MYLIB_API Result<Samples> demod_am(const Samples& x, double sample_rate,
                                    double audio_cutoff_hz = 0.0);

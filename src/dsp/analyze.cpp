@@ -11,6 +11,18 @@ namespace {
 
 using detail::kPi;
 
+/// 输入必须全部有限：NaN/Inf 会污染 FFT/瞬时频率，分类器随后会把 NaN 当成
+/// "没有特征"并给出高置信度的错误结论。O(N) 逐元素检查，消息带第一个非法下标。
+Status check_finite(const Samples& x) {
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        if (!std::isfinite(x[i])) {
+            return Status(Errc::InvalidArgument,
+                          "输入包含 NaN/Inf（第 " + std::to_string(i) + " 个样本）");
+        }
+    }
+    return Ok();
+}
+
 struct Stats {
     double mean = 0.0;
     double std  = 0.0;
@@ -55,6 +67,9 @@ Stats trimmed_stats(const std::vector<float>& v) {
 std::vector<Burst> detect_bursts(const Samples& x, std::size_t window, float threshold_db,
                                  std::size_t min_len) {
     std::vector<Burst> out;
+    // 裸 vector 返回类型没有 Status 通道（改签名会破坏 API）：非有限输入直接返回空表，
+    // 避免 NaN 参与前缀和/分位数后产出成百上千个假突发。头文件已写明该前置条件。
+    if (!check_finite(x)) return out;
     if (x.empty() || window == 0 || x.size() < window) return out;
 
     // 前缀和 -> 滑窗 RMS，O(N)
@@ -257,6 +272,7 @@ std::vector<Detection> os_cfar(const Spectrum& s, const CfarOptions& opt) {
 //  特征
 // -----------------------------------------------------------------------------
 Result<Features> analyze(const Samples& x, double sample_rate) {
+    if (auto st = check_finite(x); !st) return st;
     if (x.size() < 64) return Status(Errc::InvalidArgument, "至少需要 64 个样本");
     if (sample_rate <= 0.0) return Status(Errc::InvalidArgument, "采样率必须为正");
 

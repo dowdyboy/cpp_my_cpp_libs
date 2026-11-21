@@ -243,6 +243,21 @@ jobs:
           set -e
           f=$(ls build/ci-${{ matrix.target }}/bin/mylib_tests)
           file "$f"
+          readelf -h "$f" | grep -E 'Machine:'
+          # 不能只打印：工具链没生效时产出的是 x86-64，这个 job 必须红。
+          case "${{ matrix.target }}" in
+            armv7)
+              file "$f" | grep -q 'ARM, EABI5'
+              readelf -h "$f" | grep -qE 'Machine:[[:space:]]+ARM'
+              ;;
+            aarch64)
+              file "$f" | grep -q 'ARM aarch64'
+              readelf -h "$f" | grep -qE 'Machine:[[:space:]]+AArch64'
+              ;;
+            *)
+              echo "unknown target ${{ matrix.target }}" >&2; exit 1 ;;
+          esac
+          echo "架构校验通过: ${{ matrix.target }}"
 
   # ---------------------------------------------------------------- Windows / MSVC
   windows-msvc:
@@ -261,7 +276,7 @@ jobs:
           key: deps-windows-${{ hashFiles('scripts/fetch-deps.ps1') }}
           restore-keys: deps-windows-
       # -WithOrtWin：把 ONNX Runtime 也拉下来。没有它 infer 会退化成 stub，
-      # ml 的 9 条用例就会全部 MYTEST_SKIP —— 那等于"有 CI 但没测"。
+      # ml 的 12 条用例就会全部 MYTEST_SKIP —— 那等于"有 CI 但没测"。
       # -RequireOrtWin：这个 job 的存在意义就是跑 ml；拿不到 ORT 必须失败，
       # 不能让"ml 静默跳过"继续冒充全绿。可用仓库变量 MYLIB_ORT_WIN_URL 覆盖下载地址。
       - name: 补齐依赖压缩包（含 Windows 的 ONNX Runtime）
@@ -458,7 +473,7 @@ jobs:
   #   1. 产物链接成**全静态**：于是 qemu-*-static 直接执行，不需要 -L <sysroot>。
   #      本地已用 PetaLinux / ARM GNU 两套工具链验证 readelf -d 输出 "no dynamic section"。
   #   2. 不注册 binfmt（直接把 qemu-user-static 当解释器用），避免 update-binfmts 的权限问题。
-  #   3. 整包一次跑，不是逐用例（现在 ~300 个）各起一个进程 —— qemu 下进程启动开销比测试本身还大。
+  #   3. 整包一次跑，不是逐用例各起一个进程（当前条数见 docs/test-counts.md） —— qemu 下进程启动开销比测试本身还大。
   qemu-test:
     name: QEMU ${{ matrix.target }}（ARM 单测真跑）
     runs-on: ubuntu-24.04
@@ -541,7 +556,7 @@ jobs:
   #   * CI 的依赖只有 fetch-deps 能拿到的那几个，所以包名带后缀说明内含：
   #       linux-*-basic  —— 无 ORT/OpenCV（交叉工具链拿不到这两个的 arm 预编译包）
   #       win-x64-msvc-ort —— 有 ORT、无 OpenCV（OpenCV 官方 Windows 包不进 fetch-deps）
-  #     带 ORT+OpenCV+ncnn 的"全量包"仍由 scripts/package-all.ps1 在本机生成，
+  #     带 ORT+OpenCV（**不含 ncnn**）的"全量包"仍由 scripts/package-all.ps1 在本机生成，
   #     两者命名不同，不会混淆（见 docs/03 §4.4 的对照表）。
   package-linux:
     name: 打包 ${{ matrix.target }}（CPack）
@@ -717,7 +732,7 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
   # ---------------------------------------------------------------- Linux / OpenCV（cv 组件）
-  # cv 组件的 8 条用例以前**没有任何 job 打开过** —— 因为 CI 拿不到 OpenCV 的 Windows 预编译包。
+  # cv 组件的 11 条用例以前**没有任何 job 打开过** —— 因为 CI 拿不到 OpenCV 的 Windows 预编译包。
   # 但 Linux 上 apt 就能装（Ubuntu 24.04 是 OpenCV 4.6），而 src/cv 只用了
   # imread/imwrite/cvtColor/resize/Mat/Rect/Size 这些几十年没变的 API，4.6 完全够用。
   # 于是"cv 只在有 OpenCV 的机器上验过"这件事，在 CI 上也有了记录。
@@ -758,9 +773,13 @@ jobs:
           set -e
           ls build/ci-cv/src/*cv*.a
           test -f build/ci-cv/src/libmy_cpp_libs_cv.a
-      - name: Test（含 cv 的 8 条）
+      - name: Test（含 cv 套件）
         run: ctest --test-dir build/ci-cv --output-on-failure
       - name: 确认 cv 用例真的跑了（不是全 skip）
         run: |
           set -euo pipefail
           ./build/ci-cv/bin/mylib_tests --suite=cv
+      # 用例数只在 docs/test-counts.md 里维护，由二进制 --list 生成。
+      # 手写数字在 0.1.7~0.1.9 每一版都漂过一次，这里把它变成 CI 检查。
+      - name: 校验用例数文档（单一来源）
+        run: python3 tools/gen_test_counts.py --exe build/ci-cv/bin/mylib_tests --check

@@ -9,7 +9,9 @@
 //  注意：Eigen 是 header-only，本头会引入较多模板，属已知成本。
 // =============================================================================
 
+#include <cmath>
 #include <cstddef>
+#include <type_traits>
 #include <vector>
 
 #include <Eigen/Core>
@@ -65,7 +67,26 @@ constexpr T lerp(T a, T b, double t) noexcept {
     return static_cast<T>(a + (b - a) * t);
 }
 
+/// 向量逐元素有限性检查。
+///
+/// 注意：**矩阵请用下面的模板重载**。这个版本的形参是 `Ref<const VecXd>`，
+/// 把矩阵传进来在 Debug 下会触发 Eigen 断言，Release 下只会扫第一列。
 MYLIB_API bool all_finite(const Eigen::Ref<const VecXd>& v) noexcept;
+
+/// 矩阵/矩阵表达式的逐元素有限性检查（检查全部 rows*cols 个元素）。
+///
+/// 只对"非向量形状"启用（Cols/Rows 编译期不为 1），所以 `VecXd` 仍然走上面
+/// 的向量版本，不会产生 overload 歧义。
+template <class Derived>
+std::enable_if_t<(Derived::ColsAtCompileTime != 1 && Derived::RowsAtCompileTime != 1), bool>
+all_finite(const Eigen::MatrixBase<Derived>& m) noexcept {
+    for (Eigen::Index r = 0; r < m.rows(); ++r) {
+        for (Eigen::Index c = 0; c < m.cols(); ++c) {
+            if (!std::isfinite(static_cast<double>(m.derived()(r, c)))) return false;
+        }
+    }
+    return true;
+}
 
 // =============================================================================
 //  姿态：欧拉角 <-> 旋转矩阵 <-> 四元数

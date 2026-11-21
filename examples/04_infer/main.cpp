@@ -33,7 +33,7 @@ void print_ports(const char* title, const std::vector<my::infer::Port>& ports) {
 int main(int argc, char** argv) {
     my::log::Config lc;
     lc.level = my::log::Level::Info;
-    my::log::init(lc);
+    (void)my::log::init(lc);
 
     my::log::info("编译期后端: {} | 已注册: {}", my::infer::build_backend(),
                   [&] {

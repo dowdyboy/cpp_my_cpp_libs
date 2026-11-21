@@ -77,7 +77,7 @@ public:
     /// "code: message" 形式的完整描述
     [[nodiscard]] MYLIB_API std::string to_string() const;
 
-    /// 追加/替换上下文信息（调试用，返回自身以支持链式）
+    /// 替换上下文信息（调试用，返回自身以支持链式）
     Status& with_message(std::string message) noexcept {
         message_ = std::move(message);
         return *this;
@@ -100,6 +100,8 @@ inline Status Ok() noexcept { return Status{}; }
 //
 //  注意：value() 不做检查，必须先用 ok() 判定；违反约定时直接 abort
 //        （这是编程错误，不是运行期可恢复错误）。
+//        Result(Status) 只接受**失败状态**：Ok 不是失败值，传 Ok 构造同样 abort
+//        （否则会得到 ok()==false 但 status().ok()==true 的非法对象）。
 // -----------------------------------------------------------------------------
 template <class T>
 class [[nodiscard]] Result {
@@ -109,7 +111,20 @@ public:
 
     // --- 构造 ---
     Result(T value) : storage_(std::in_place_index<0>, std::move(value)) {}
-    Result(Status status) : storage_(std::in_place_index<1>, std::move(status)) {}
+
+    /// 失败构造：status 必须是失败状态。
+    /// **Ok 不是失败值**：以前这里不检查，`Result<int> r = my::Ok();` 会产生
+    /// ok()==false 而 status().ok()==true 的非法对象（下游会当成"失败但没有错误码"）。
+    /// 这是编程错误，和 value() 违反前置条件同一级别：留一行线索后 abort，
+    /// 不抛异常（对外 API 不用异常）。
+    Result(Status status) : storage_(std::in_place_index<1>, std::move(status)) {
+        if (std::get<1>(storage_).ok()) {
+            std::fprintf(stderr,
+                         "[my_cpp_libs] Result<T> 用 Ok 状态构造：Ok 不是失败值"
+                         "（会得到 ok()==false 但 status().ok()==true 的非法对象）\n");
+            std::abort();
+        }
+    }
 
     // 允许从可隐式转换的类型构造，例如 Result<double> r = 1.0f;
     template <class U, class = std::enable_if_t<

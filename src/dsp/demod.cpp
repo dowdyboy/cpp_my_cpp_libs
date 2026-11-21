@@ -12,6 +12,32 @@ namespace {
 using detail::kPi;
 using detail::kTwoPi;
 
+/// 输入必须全部有限：NaN/Inf 会顺着解析信号/滤波器状态污染整段输出，
+/// 且滤波器状态一旦变 NaN 就不会自行恢复。O(N) 逐元素检查，消息带第一个非法下标。
+Status check_finite(const Samples& x) {
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        if (!std::isfinite(x[i])) {
+            return Status(Errc::InvalidArgument,
+                          "输入包含 NaN/Inf（第 " + std::to_string(i) + " 个样本）");
+        }
+    }
+    return Ok();
+}
+
+/// 复基带版本：实部/虚部任一非有限都算非法。
+Status check_finite(const CSamples& x) {
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        const bool re_ok = std::isfinite(x[i].real());
+        const bool im_ok = std::isfinite(x[i].imag());
+        if (!re_ok || !im_ok) {
+            return Status(Errc::InvalidArgument,
+                          "输入包含 NaN/Inf（第 " + std::to_string(i) + " 个样本的" +
+                              (re_ok ? "虚部" : "实部") + "）");
+        }
+    }
+    return Ok();
+}
+
 /// 低通（二阶），cutoff <= 0 时用 fs/200 作为"音频/基带"默认。
 /// 设计失败不能静默跳过：返回 Status，由 demod_am/fm 透传给调用方。
 Status lowpass_inplace(Samples& x, double cutoff_hz, double sample_rate) {
@@ -144,6 +170,7 @@ double mean_power(const std::vector<Complex>& syms) {
 //  模拟调制
 // -----------------------------------------------------------------------------
 Result<Samples> demod_am(const Samples& x, double sample_rate, double audio_cutoff_hz) {
+    if (auto st = check_finite(x); !st) return st;
     if (x.size() < 32) return Status(Errc::InvalidArgument, "样本太少");
     if (sample_rate <= 0.0) return Status(Errc::InvalidArgument, "采样率必须为正");
 
@@ -156,6 +183,7 @@ Result<Samples> demod_am(const Samples& x, double sample_rate, double audio_cuto
 }
 
 Result<Samples> demod_fm(const Samples& x, double sample_rate, double audio_cutoff_hz) {
+    if (auto st = check_finite(x); !st) return st;
     if (x.size() < 32) return Status(Errc::InvalidArgument, "样本太少");
     if (sample_rate <= 0.0) return Status(Errc::InvalidArgument, "采样率必须为正");
 
@@ -172,6 +200,7 @@ Result<Samples> demod_fm(const Samples& x, double sample_rate, double audio_cuto
 // -----------------------------------------------------------------------------
 Result<std::vector<std::uint8_t>> demod_ask(const Samples& x, double sample_rate,
                                             double symbol_rate, float threshold) {
+    if (auto st = check_finite(x); !st) return st;
     if (x.size() < 32) return Status(Errc::InvalidArgument, "样本太少");
     if (sample_rate <= 0.0 || symbol_rate <= 0.0) {
         return Status(Errc::InvalidArgument, "采样率/符号率必须为正");
@@ -198,6 +227,7 @@ Result<std::vector<std::uint8_t>> demod_ask(const Samples& x, double sample_rate
 
 Result<std::vector<std::uint8_t>> demod_fsk(const Samples& x, double sample_rate,
                                             double symbol_rate, double mark_hz, double space_hz) {
+    if (auto st = check_finite(x); !st) return st;
     if (x.size() < 32) return Status(Errc::InvalidArgument, "样本太少");
     if (sample_rate <= 0.0 || symbol_rate <= 0.0) {
         return Status(Errc::InvalidArgument, "采样率/符号率必须为正");
@@ -221,6 +251,7 @@ Result<std::vector<std::uint8_t>> demod_fsk(const Samples& x, double sample_rate
 
 Result<std::vector<std::uint8_t>> demod_bpsk(const CSamples& x, double sample_rate,
                                              double symbol_rate) {
+    if (auto st = check_finite(x); !st) return st;
     if (x.size() < 64) return Status(Errc::InvalidArgument, "样本太少");
     if (sample_rate <= 0.0 || symbol_rate <= 0.0) {
         return Status(Errc::InvalidArgument, "采样率/符号率必须为正");

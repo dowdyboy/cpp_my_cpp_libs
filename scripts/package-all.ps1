@@ -2,7 +2,11 @@
 # ASCII only (PS 5.1 reads BOM-less files as ANSI).
 param(
     # Skip the unpack/verify step (packaging only; verify runs by default)
-    [switch] $SkipVerify
+    [switch] $SkipVerify,
+    # Allow packaging from a dirty working tree (NOT for releases; the resulting
+    # package will contain "commit-dirty" in BUILD-INFO and cannot be rebuilt
+    # from the tag).
+    [switch] $AllowDirty
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot   # this script lives in scripts/
@@ -10,17 +14,40 @@ Set-Location $root
 $env:PATH = "D:\ProgramFiles\msys64\ucrt64\bin;D:\ProgramFiles\ninja-win;$env:PATH"
 $gxx = "D:/ProgramFiles/msys64/ucrt64/bin/g++.exe"
 $ninja = "D:/ProgramFiles/ninja-win/ninja.exe"
-# NOTE: the SDK package does NOT ship ncnn. Its static lib pulls openmp/vulkan
-# transitive deps, and reproducing that in the package Config is how you get a
-# second class of "undefined symbol" bugs. So build packages with NCNN=OFF, which
-# keeps libmy_cpp_libs_infer free of ncnn references. (0.1.7 and earlier had it ON,
-# so any consumer linking my_cpp_libs::infer failed to link.) Want ncnn? Build from source.
+
+# A clean clone has no build/ directory (it is gitignored), so create the log
+# directory before the first Out-File. Without this the script dies with
+# DirectoryNotFoundException on any fresh checkout.
+New-Item -ItemType Directory -Force -Path (Join-Path $root 'build\_logs') | Out-Null
+
 $log = "$root\build\_logs\pkg-all.txt"
 "" | Out-File -Encoding utf8 $log
 function Say($m) { Write-Host $m; $m | Out-File -Encoding utf8 -Append $log }
 function Assert-Exit($what) {
     if ($LASTEXITCODE -ne 0) { throw "$what failed (exit $LASTEXITCODE); see build\_logs" }
 }
+
+# Release packages must be rebuildable from the tag. Refuse to package a dirty
+# tree unless the caller explicitly opts in (local experiments).
+$git = Get-Command git -ErrorAction SilentlyContinue
+if (-not $git) {
+    Write-Warning "git not found in PATH; cannot verify the tree is clean"
+} else {
+    git -C $root diff-index --quiet HEAD --
+    if ($LASTEXITCODE -ne 0) {
+        if (-not $AllowDirty) {
+            throw ("working tree is dirty (git diff-index exit $LASTEXITCODE). " +
+                   "Commit or stash first, or pass -AllowDirty for a throwaway package.")
+        }
+        Write-Warning "packaging a dirty tree (-AllowDirty): BUILD-INFO will say '-dirty'"
+    }
+}
+
+# NOTE: the SDK package does NOT ship ncnn. Its static lib pulls openmp/vulkan
+# transitive deps, and reproducing that in the package Config is how you get a
+# second class of "undefined symbol" bugs. So build packages with NCNN=OFF, which
+# keeps libmy_cpp_libs_infer free of ncnn references. (0.1.7 and earlier had it ON,
+# so any consumer linking my_cpp_libs::infer failed to link.) Want ncnn? Build from source.
 
 # ---- 1. MinGW basic ----
 Say "== package: win-x64-mingw-basic =="
@@ -102,7 +129,9 @@ foreach ($s in $specs) {
     if (-not $pkg) { throw "package missing: *$($s.Suffix).$($s.Ext)" }
     if (-not $SkipVerify) {
         Say "== verify: $($pkg.Name) =="
-        & "$PSScriptRoot\verify-package.ps1" -Package $pkg.FullName -Mode $s.Mode
+        $verifyArgs = @{ Package = $pkg.FullName; Mode = $s.Mode }
+        if (-not $AllowDirty) { $verifyArgs['StrictCommit'] = $true }
+        & "$PSScriptRoot\verify-package.ps1" @verifyArgs
         if ($LASTEXITCODE -ne 0) { throw "verify-package failed: $($pkg.Name)" }
     }
 }

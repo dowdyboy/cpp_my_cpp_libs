@@ -37,7 +37,10 @@ using Bytes = std::vector<std::uint8_t>;
 //  地址
 // =============================================================================
 struct Endpoint {
-    std::string   host;  ///< "192.168.1.10" / "localhost" / ""（表示 INADDR_ANY）
+    /// "192.168.1.10" / "localhost" / "::1" / ""
+    /// 空串在 bind 里表示 **IPv4 任意地址 0.0.0.0（INADDR_ANY）**，不是双栈；
+    /// 要监听 IPv6/双栈必须显式传 "::"（见 TcpListener::bind 的说明）。
+    std::string   host;
     std::uint16_t port = 0;
 
     std::string to_string() const;
@@ -123,6 +126,15 @@ public:
 
     /// 绑定监听。port = 0 时由系统分配（用 port() 取实际端口）。
     ///
+    /// **host 语义**：空串固定优先解析成 IPv4 任意地址 0.0.0.0，所以
+    /// `bind({"", port})` 在 Windows 和 Linux 上都能被 127.0.0.1 连上。
+    /// 要监听 IPv6/双栈必须显式传 "::"（传了 IPv6 地址时库会尽力关闭
+    /// IPV6_V6ONLY 得到双栈；平台/策略不允许时退化为仅 IPv6）。
+    ///
+    /// 注意：原实现直接按 getaddrinfo(AI_PASSIVE, AF_UNSPEC) 的第一个结果 bind，
+    /// Windows 上 "::" 排前且 IPV6_V6ONLY 默认 1 —— 空 host 反而只监听 IPv6，
+    /// 与"INADDR_ANY"的承诺不符。
+    ///
     /// reuse_addr 默认开：POSIX 上等价于 SO_REUSEADDR（避免服务端重启时因 TIME_WAIT
     /// 绑不上）；**Windows 上语义不同** —— SO_REUSEADDR 允许第二个 socket 绑定同一
     /// 端口，等于把"端口冲突检测"和"端口劫持防护"一起废掉。所以：
@@ -160,7 +172,7 @@ public:
     UdpSocket(const UdpSocket&)            = delete;
     UdpSocket& operator=(const UdpSocket&) = delete;
 
-    /// 绑定到本地地址（host 为空表示 INADDR_ANY）
+    /// 绑定到本地地址（host 为空 = **IPv4 任意地址 0.0.0.0**；要 IPv6/双栈请显式传 "::"）
     MYLIB_API static Result<UdpSocket> bind(const Endpoint& ep);
 
     /// 只发不收的 socket（IPv4；系统在第一次 send_to 时分配端口）
@@ -177,7 +189,12 @@ public:
 
     MYLIB_API Result<std::size_t> send_to(const Endpoint& ep, const void* data,
                                           std::size_t size);
-    /// 收一个数据报；max_size 是缓冲上限（UDP 数据报上限 65535，超过直接 OutOfRange）
+    /// 收一个数据报；max_size 是缓冲上限（UDP 数据报上限 65535，超过直接 OutOfRange）。
+    ///
+    /// **截断语义**：数据报比 max_size 长时**不交付截断数据**，返回 Errc::OutOfRange
+    /// （POSIX 用 recvmsg(MSG_TRUNC) 报出真实长度；Windows 报 WSAEMSGSIZE，真实长度不可知），
+    /// 且该数据报已被内核丢弃（不会留到下一次 recv_from）。调用方应加大 max_size
+    /// 让对端重发，或按协议约定的最大报文长度重新接收。
     MYLIB_API Result<Datagram> recv_from(std::size_t max_size = 65535);
 
     MYLIB_API std::uint16_t port() const;

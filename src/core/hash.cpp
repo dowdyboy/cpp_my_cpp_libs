@@ -15,9 +15,12 @@
 #include "my_cpp_libs/core/hash.hpp"
 #include "my_cpp_libs/core/path_utf8.hpp"
 
+#include <cerrno>
 #include <fstream>
 #include <cstring>
 #include <string>
+#include <system_error>
+#include <utility>
 
 namespace my::hash {
 namespace {
@@ -198,7 +201,12 @@ Result<std::string> sha256_file_hex(const std::string& path) {
     // 按 ANSI 代码页解释路径，中文/日文的 UTF-8 路径打不开（0.1.7 的同类缺陷）。
     std::ifstream in(core::to_path(path), std::ios::binary);
     if (!in) {
-        return Status(Errc::IoError, "打开文件失败: " + path);
+        const int e = errno;
+        std::string msg = "打开文件失败: " + path;
+        if (e != 0) {
+            msg += "（" + std::error_code(e, std::generic_category()).message() + "）";
+        }
+        return Status(Errc::IoError, std::move(msg));
     }
 
     Sha256 h;
@@ -210,7 +218,14 @@ Result<std::string> sha256_file_hex(const std::string& path) {
         if (n > 0) h.update(buf, static_cast<std::size_t>(n));
         if (n < static_cast<std::streamsize>(sizeof buf)) break;
     }
-    if (in.bad()) return Status(Errc::IoError, "读文件失败: " + path);
+    if (in.bad()) {
+        const int e = errno;
+        std::string msg = "读文件失败: " + path;
+        if (e != 0) {
+            msg += "（" + std::error_code(e, std::generic_category()).message() + "）";
+        }
+        return Status(Errc::IoError, std::move(msg));
+    }
     return h.hex_digest();
 }
 

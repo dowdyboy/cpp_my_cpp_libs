@@ -91,7 +91,9 @@ struct Feed {
 struct Outcome {
     std::string name;
     Tensor      tensor;
-};struct Options {
+};
+
+struct Options {
     /// 后端名；空串表示使用默认后端
     std::string backend;
     /// 模型路径（onnx / 后端自有格式）
@@ -165,8 +167,12 @@ MYLIB_API std::vector<std::string> available_backends();
 
 MYLIB_API bool has_backend(std::string_view name);
 
-/// 创建会话。Options::backend 为空时按优先级挑选：
-///   onnxruntime -> ncnn -> stub
+/// 创建会话。Options::backend 为空时：
+///   * `model_path` 为空 → `stub`（不加载模型，只跑通调用链）；
+///   * `.onnx` → 只允许 `onnxruntime`，不可用直接 `Unsupported`（绝不退到 stub）；
+///   * ncnn `.param` → 只允许 `ncnn`，不可用直接 `Unsupported`；
+///   * 其它扩展名 → 按 `onnxruntime` → `ncnn` 顺序挑已注册的后端。
+/// 显式指定 `backend` 时按指定值创建，不存在则 `Unsupported`。
 MYLIB_API Result<std::unique_ptr<Session>> create_session(const Options& options);
 
 /// 编译期已知的推理能力描述，例如 "onnxruntime" / "stub"

@@ -7,7 +7,9 @@
 //  而这三样正是最容易写错的地方（丢失唤醒、忘记 join、析构时 joinable → terminate）。
 //
 //  三条约定：
-//    * **析构一定安全**：ThreadPool/PeriodicTask 析构会 drain + join，不会 terminate；
+//    * **析构一定安全**：ThreadPool 析构会 drain + join；PeriodicTask 析构会 stop + join。
+//      若在回调线程内销毁 PeriodicTask，则只置停止标志并 detach（不能 join 自己），
+//      线程由共享 State 保活、在下一个周期点退出，之后 ticks/errors 不再更新；
 //    * **有界队列优先**：BlockingQueue 默认无界，但生产端要能设上限，
 //      否则"消费者慢"会变成"内存打满"（板端只有 512 MB DDR）；
 //    * **不用异常上报错误**：create() 返回 Result，submit 在池已关闭时给出无效 future
@@ -193,6 +195,18 @@ private:
 // =============================================================================
 /// 固定周期回调（周期从"上一次开始"算，不会因为执行慢而漂移成突发）。
 /// 回调抛异常会被吞掉并计数，不会把线程带走。
+///
+/// 生命周期：状态全部放在 shared_ptr<State> 里，线程只捕获它、不再捕获 this。
+/// 因此：
+///   * stop() 可从任意线程重复调用；并发调用由内部 join_mutex_ 串行化 ——
+///     两个外部线程同时 stop() 也只会 join 一次，不会对同一个 std::thread 双 join；
+///   * 在回调线程内 stop()/销毁任务时只置停止标志并 detach（不能 join 自己）。
+///     此时 State 由线程持有的 shared_ptr 保活，loop() 不会再访问已销毁的
+///     PeriodicTask，结构上安全；但线程要在下一个周期点才真正退出，
+///     之后 ticks/errors/running 不再更新。
+///   * 析构本身可从任意线程（包括回调线程）调用；但**不要与其他线程正在进行的
+///     stop()/running() 等成员调用并发** —— 对象销毁与成员调用并发属于调用方的
+///     生命周期错误（任何 C++ 对象都是如此）。
 class PeriodicTask {
 public:
     /// period 必须 > 0；run_immediately=true 时先立刻执行一次再进入周期
@@ -204,7 +218,8 @@ public:
     PeriodicTask(const PeriodicTask&)            = delete;
     PeriodicTask& operator=(const PeriodicTask&) = delete;
 
-    /// 停止并 join（幂等，可在回调内部调用）
+    /// 停止并 join。可从任意线程重复调用；并发调用由内部 join_mutex_ 串行化。
+    /// 回调线程内调用只置停止标志并 detach（不 join 自己），此时返回不代表线程已退出。
     MYLIB_API void stop();
 
     MYLIB_API std::uint64_t ticks() const noexcept;
@@ -213,17 +228,16 @@ public:
 
 private:
     PeriodicTask() = default;
-    void loop();
 
-    std::chrono::milliseconds period_{0};
-    std::function<void()>     fn_;
-    std::thread               thread_;
-    mutable std::mutex        mutex_;
-    std::condition_variable   cv_;
-    std::atomic<bool>         stop_{false};
-    std::atomic<bool>         in_loop_{false};
-    std::atomic<std::uint64_t> ticks_{0};
-    std::atomic<std::uint64_t> errors_{0};
+    /// 与 PeriodicTask 对象解耦的生命周期状态：线程只碰它，不碰 this。
+    /// 这样"在回调里销毁任务"之后 loop() 仍然安全（原先会让线程继续访问 this）。
+    struct State;
+    static void loop(const std::shared_ptr<State>& st);
+
+    std::shared_ptr<State> state_;
+    std::thread            thread_;
+    /// 串行化 joinable()/join()/detach()：并发 stop() 时后来者必须等第一个 join 完
+    std::mutex             join_mutex_;
 };
 
 }  // namespace my::thread

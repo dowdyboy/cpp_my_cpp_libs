@@ -13,9 +13,16 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
+
+#if defined(_WIN32)
+#  include <process.h>
+#else
+#  include <unistd.h>
+#endif
 
 MYTEST_SUITE("log");
 
@@ -195,6 +202,55 @@ MYTEST_CASE(log_async_roundtrip) {
         if (line.find("async 一行") != std::string::npos) ++hits;
     }
     CHECK_EQ(hits, std::size_t{100});   // 一条不多、一条不少
+}
+
+// A6 回归：异步 logger 的 flush() 必须把队列排空，而不是只把 flush 消息入队。
+// 20 万行实测丢过最后 50 行；这里用 20000 行 + 唯一临时文件把窗口放大。
+// 关键：flush() 返回后**立即**读文件，不能靠随后的 shutdown() 掩盖丢失。
+MYTEST_CASE(log_async_flush_drains_queue) {
+    std::error_code ec;
+    std::filesystem::create_directories("output", ec);
+
+#if defined(_WIN32)
+    const unsigned long pid = static_cast<unsigned long>(::_getpid());
+#else
+    const unsigned long pid = static_cast<unsigned long>(::getpid());
+#endif
+    std::random_device rd;
+    const std::string  path = "output/mylib_test_log_async_flush_" + std::to_string(pid) + "_" +
+                             std::to_string(rd()) + ".log";
+    std::filesystem::remove(my::core::to_path(path), ec);
+
+    my::log::Config cfg;
+    cfg.to_console       = false;
+    cfg.file_path        = path;
+    cfg.rotate_bytes     = 0;
+    cfg.level            = my::log::Level::Info;
+    cfg.async            = true;
+    cfg.async_queue_size = 8192;
+    cfg.pattern          = "%v";
+    CHECK_OK(my::log::init(cfg));
+
+    constexpr int kLines = 20000;
+    for (int i = 0; i < kLines; ++i) {
+        my::log::write(my::log::Level::Info, "async-flush-line-" + std::to_string(i));
+    }
+    my::log::flush();
+
+    // 立即逐行读：此时异步队列应当已经排空
+    std::size_t lines  = 0;
+    bool        opened = false;
+    {
+        std::ifstream in(my::core::to_path(path), std::ios::binary);
+        opened = static_cast<bool>(in);
+        std::string line;
+        while (std::getline(in, line)) ++lines;
+    }
+    my::log::shutdown();
+    std::filesystem::remove(my::core::to_path(path), ec);
+
+    CHECK(opened);
+    CHECK_EQ(lines, std::size_t{kLines});   // 一条不能少
 }
 
 // 本库的 init/shutdown 只管理自己创建的 logger：

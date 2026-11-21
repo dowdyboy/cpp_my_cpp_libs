@@ -9,7 +9,9 @@
 //
 //  约定：
 //    * **read_some() 超时返回 0 字节，不是错误**。串口"暂时没数据"是常态，轮询循环里
-//      不该每次都当错误处理；只有真正的错误（未打开、设备消失、ioctl 失败）才返回 Status。
+//      不该每次都当错误处理；只有真正的错误（未打开、设备消失、ioctl 失败、
+//      **对端挂断/EOF**）才返回 Status。对端挂断/EOF 映射成 Errc::IoError，不是
+//      0 字节超时 —— 否则文档推荐的 `if (n == 0) continue;` 会在拔线后 100% 空转。
 //      （my::net 的 recv 超时返回 Errc::Timeout —— TCP 超时通常意味着对端出问题，
 //        这两者的取舍不同，不要记混。）
 //    * write_all() 会把整个缓冲写完，或超时后返回已写字节数与 Errc::Timeout。
@@ -21,9 +23,11 @@
 //    * Linux：只支持 termios 的标准档位，见 standard_bauds()。给非标准值会返回
 //      Errc::InvalidArgument 并在消息里列出支持的值 —— 不静默降级。
 //
-//  典型用法：
-//    auto port = my::serial::Port::open("/dev/ttyUSB0",
-//                    my::serial::Config{.baud = 921600, .data_bits = 8});
+//  典型用法（C++17：逐字段赋值，不能用 C++20 的指定初始化器）：
+//    my::serial::Config cfg;
+//    cfg.baud      = 921600;
+//    cfg.data_bits = 8;
+//    auto port = my::serial::Port::open("/dev/ttyUSB0", cfg);
 //    if (!port) { /* port.status().message() */ }
 //    std::uint8_t buf[64];
 //    auto n = port.value().read_some(buf, sizeof buf, std::chrono::milliseconds(100));
@@ -117,6 +121,7 @@ public:
     Status close() noexcept;
 
     /// 读最多 n 字节；**超时返回 0 字节、status 为 Ok**（见文件头约定）。
+    /// 对端挂断/EOF 返回 Errc::IoError，不是 0 字节超时。
     /// n == 0 立即返回 0。
     Result<std::size_t> read_some(void* buf, std::size_t n, std::chrono::milliseconds timeout);
 

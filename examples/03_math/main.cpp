@@ -26,7 +26,7 @@ int main() {
     my::log::Config lc;
     lc.level = my::log::Level::Info;
     lc.use_color = true;
-    my::log::init(lc);
+    (void)my::log::init(lc);
 
     // =========================================================================
     //  1) 姿态：欧拉角 <-> 旋转矩阵 <-> 四元数

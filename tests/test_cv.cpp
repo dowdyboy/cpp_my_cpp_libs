@@ -221,6 +221,20 @@ MYTEST_CASE(cv_utf8_path_roundtrip) {
     std::filesystem::remove(my::core::to_path(dir), ec);
 }
 
+// A10 回归：IMREAD_UNCHANGED 读出的 16U 图以前会被 prepare 静默处理成错误结果：
+// letterbox 分支 convertTo 饱和成 8U，拉伸分支把 16U 字节当 u8 读。必须明确拒绝。
+MYTEST_CASE(cv_prepare_rejects_non_8u) {
+    my::cv::Image img(8, 8, CV_16UC3, ::cv::Scalar(0, 0, 0));
+
+    my::cv::PreprocessSpec spec;
+    spec.input_width  = 8;
+    spec.input_height = 8;
+
+    auto r = my::cv::prepare(img, spec);
+    CHECK(!r);
+    CHECK_EQ(r.status().code(), my::Errc::Unsupported);
+}
+
 // 画布/张量分配必须有上限，不能把 cv::Exception / bad_alloc 抛出 Result。
 MYTEST_CASE(cv_prepare_rejects_huge_canvas) {
     my::cv::Image img(1, 1000, CV_8UC3, ::cv::Scalar(0, 0, 0));

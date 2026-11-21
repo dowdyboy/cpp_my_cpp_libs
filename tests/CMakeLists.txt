@@ -66,7 +66,7 @@ if(TARGET mylib_infer)
 endif()
 
 # preprocess 是独立 target（image/http/cv 也会用到），不能挂在 infer 下面：
-# 否则 -DMYLIB_ENABLE_INFER=OFF 时这 25 个用例会静默消失。
+# 否则 -DMYLIB_ENABLE_INFER=OFF 时这 28 个用例会静默消失。
 if(TARGET mylib_preprocess)
     list(APPEND _test_sources test_preprocess.cpp)
     list(APPEND _test_suites preprocess)
@@ -79,6 +79,8 @@ if(TARGET mylib_image AND TARGET mylib_net AND TARGET mylib_thread AND TARGET my
     list(APPEND _test_sources test_gaps.cpp)
     list(APPEND _test_suites gaps)
     list(APPEND _test_links mylib_image mylib_net mylib_thread mylib_io mylib_json mylib_math mylib_time)
+    # gaps 的 target 条件是"五者同时存在"，没法用 mylib_require_suite 的单一 target 表达
+    list(APPEND _suite_minima "gaps:12")
 endif()
 
 if(TARGET mylib_dsp)
@@ -117,6 +119,55 @@ if(TARGET mylib_cv)
     list(APPEND _test_suites cv)
     list(APPEND _test_links mylib_cv)
 endif()
+
+# -----------------------------------------------------------------------------
+#  每个套件的最小用例数
+#
+#  `--expect-cases` 比较的是"二进制里注册的用例数"与"参与编译的源码扫描数"。
+#  如果某个 test_*.cpp 整份从 _test_sources 里掉出去（改条件、写错 target 名、
+#  合并文件时漏了），两边会一起缩水，那个检查仍然是绿的。
+#
+#  这里按套件兜底：只要组件 target 存在，就要求对应套件至少有 N 条用例。
+#  N 是 Tier 0（2026-11-21）时的值；新增用例只会让它变大，不会让检查失效。
+# -----------------------------------------------------------------------------
+set(_suite_minima "")
+macro(mylib_require_suite _suite _min _target _file)
+    if(TARGET ${_target})
+        list(FIND _test_sources ${_file} _idx)
+        if(_idx EQUAL -1)
+            message(FATAL_ERROR
+                "套件 ${_suite} 的文件 ${_file} 没有加入 _test_sources —— "
+                "该组用例会静默消失（tests/CMakeLists.txt 的 target 条件写错了？）")
+        endif()
+        list(APPEND _suite_minima "${_suite}:${_min}")
+    endif()
+endmacro()
+
+mylib_require_suite(core      14 mylib_core       test_core.cpp)
+mylib_require_suite(hash       9 mylib_core       test_hash.cpp)
+mylib_require_suite(framework  5 mylib_core       test_framework_self.cpp)
+mylib_require_suite(log       16 mylib_log        test_log.cpp)
+mylib_require_suite(json      15 mylib_json       test_json.cpp)
+mylib_require_suite(config    12 mylib_json       test_config.cpp)
+mylib_require_suite(io        15 mylib_io         test_io.cpp)
+mylib_require_suite(time      11 mylib_time       test_time.cpp)
+mylib_require_suite(thread    17 mylib_thread     test_thread.cpp)
+mylib_require_suite(serial    18 mylib_serial     test_serial.cpp)
+mylib_require_suite(math      15 mylib_math       test_math.cpp)
+mylib_require_suite(infer     17 mylib_infer      test_infer.cpp)
+mylib_require_suite(preprocess 28 mylib_preprocess test_preprocess.cpp)
+mylib_require_suite(dsp       50 mylib_dsp        test_dsp.cpp)
+mylib_require_suite(dsp_stream 11 mylib_dsp       test_dsp_stream.cpp)
+mylib_require_suite(ml        12 mylib_ml         test_ml.cpp)
+mylib_require_suite(net       30 mylib_net        test_net.cpp)
+mylib_require_suite(http      25 mylib_http       test_http.cpp)
+mylib_require_suite(image     24 mylib_image      test_image.cpp)
+mylib_require_suite(cv        11 mylib_cv         test_cv.cpp)
+
+set(_min_suite_args "")
+foreach(_m ${_suite_minima})
+    list(APPEND _min_suite_args "--min-suite=${_m}")
+endforeach()
 
 add_executable(mylib_tests ${_test_sources})
 target_link_libraries(mylib_tests PRIVATE ${_test_links} mylib_warnings mylib_sanitize)
@@ -187,10 +238,10 @@ if(NOT CMAKE_CROSSCOMPILING)
         PASS_REGULAR_EXPRESSION "core:"
         TIMEOUT 60)
 
-    # 自检 2：二进制里实际注册的用例数必须等于源码扫描数。
-    # 少了（新增 test_*.cpp 但没加进 _test_sources）或多了（扫描漏了某个文件）
-    # 都会在这里变成失败，而不是"少跑几个用例还全绿"。
-    add_test(NAME mylib_case_count COMMAND mylib_tests --expect-cases=${_case_count})
+    # 自检 2：二进制里实际注册的用例数必须等于源码扫描数，
+    # 且每个已启用套件的条数不能低于下限（防止整份 TU 掉出 _test_sources）。
+    add_test(NAME mylib_case_count COMMAND mylib_tests --expect-cases=${_case_count}
+             ${_min_suite_args})
     set_tests_properties(mylib_case_count PROPERTIES
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
         TIMEOUT 60)

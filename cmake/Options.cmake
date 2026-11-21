@@ -60,7 +60,7 @@ option(MYLIB_BUILD_SHARED "构建动态库" OFF)
 set(MYLIB_SANITIZE "" CACHE STRING "消毒器：留空 / address / undefined / thread")
 set_property(CACHE MYLIB_SANITIZE PROPERTY STRINGS "" address undefined thread)
 
-# 以 -fno-exceptions 编译本库（**只支持 core + math + dsp + net**，见文件末尾的校验）
+# 以 -fno-exceptions 编译本库（**只支持 core + math + dsp + net + io + time + serial**，见文件末尾的校验）
 option(MYLIB_NO_EXCEPTIONS "以 -fno-exceptions 编译本库（只支持 core + math + dsp + net + io + time + serial）" OFF)
 
 # 三方依赖目录（默认在源码树 third_party，由 resources/*.zip 自动解压）
@@ -76,9 +76,10 @@ set(MYLIB_ONNXRUNTIME_ROOT "" CACHE PATH "ONNX Runtime 预编译包根目录（�
 # -----------------------------------------------------------------------------
 if(MYLIB_BUILD_SHARED)
     message(FATAL_ERROR
-        "MYLIB_BUILD_SHARED=ON 暂不支持：公共头里还有50+ 个对外符号没标 MYLIB_API，\n"
-        "开启 hidden visibility 之后消费方会链接失败。推荐用默认的静态库（add_subdirectory\n"
-        "源码分发，换平台重编，本来就没有 ABI 问题）。原因与待办见 docs/03 §9。")
+        "MYLIB_BUILD_SHARED=ON 暂不支持：共享库需要逐个核对符号可见性（hidden visibility）、\n"
+        "静态初始化顺序与模板实例化，目前只验证过静态库；而且项目定位是源码分发\n"
+        "（add_subdirectory 后各平台重编），本来就没有 ABI 问题。\n"
+        "推荐用默认的静态库。原因与待办见 docs/03 §9。")
     set(_mylib_lib_type SHARED)
     set(MYLIB_SHARED_DEFINE ON)
 else()

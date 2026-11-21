@@ -161,12 +161,12 @@ python scripts/make_test_model.py models/identity_1x1x4.onnx
 
 | 项目 | 结果 |
 |---|---|
-| 单元测试 | 宿主端 **356 个用例**（无 OpenCV）/ **367 个**（有 OpenCV，含 cv 11 个），另有 no-exceptions 子集 178 个；<br>板端 **158 / 158 通过（2026-11-16 上板实测，全组件，2 秒跑完）** ← 0.1.0 时的历史数据 |
+| 单元测试 | 宿主端：全组件 **382 条**（含 cv 12 条）、无 OpenCV **370 条**、no-exceptions 子集 **184 条**——**以 [docs/test-counts.md](docs/test-counts.md)（由 `mylib_tests --list` 生成）为准**；<br>板端 **158 / 158 通过（2026-11-16 上板实测，全组件，2 秒跑完）** ← 0.1.0 时的历史数据 |
 | 板端性能（Zynq-7020） | ml 表格模型 ≈0.07~0.10 ms/次；dsp 全链路 67 ms；image 957 ms；net 36 ms；http 141 ms（见 [06 §0](docs/06-板端验证手册.md)） |
 | 板端性能（Pi 4B / aarch64） | **158/158 通过（1 秒）**；ml 0.016~0.017 ms/次；bench_cnn 74 ms（比 A9 快 10.4×）（见 [06 §0.7](docs/06-板端验证手册.md)） |
 | **全依赖上板** | ✅ 8 个三方库全部有 armv7 产物：Eigen / nlohmann / spdlog / stb / pocketfft（头文件或源码）+ ORT 1.18.1 + ncnn + **OpenCV 4.12（GLIBC_2.29）** |
 | small_cnn（32×32） | 2.47 ms |
-| bench_cnn（224×224, ≈300 MMAC） | **585 ms**（ncnn）/ **865 ms**（ORT） |
+| bench_cnn（224×224, ≈300 MMAC） | **585 ms**（ncnn）/ **865 ms**（ORT）——两个数字来自不同构建/后端，测量条件见 [06 §0](docs/06-板端验证手册.md) |
 | MobileNetV2-12（官方模型） | **1367 ms**（ORT） |
 | 内存峰值 | 140~153 MB |
 | 数值一致性 | 与 x86 一致 |
@@ -204,7 +204,8 @@ model_inspect models\small_cnn.onnx       --run --dump output\a.txt
 model_inspect models\ncnn\small_cnn.param --run --shape 1,3,32,32 --dump output\b.txt
 python tools\compare_outputs.py output\a.txt output\b.txt
 
-# 板端部署（板子到手后）
+# 板端部署（板子到手后）。默认 -Preset linux-armv7-static：全静态、不依赖板端 glibc，
+# PetaLinux 2020.2（glibc 2.30）可直接跑；要用板子配套 SDK 的动态产物时加 -Preset linux-armv7-sdk2020
 .\scripts\deploy-and-bench.ps1 -Board <ip> -User root
 # 板子不在手边：先打离线包（03 §5 讲了怎么手工放上去）
 .\scripts\deploy-and-bench.ps1 -Package
@@ -227,7 +228,7 @@ include/my_cpp_libs/    对外公共头
 src/                    组件实现
 examples/               封装层示例 + 原生 API 示例 + 独立消费方工程
 tools/                  命令行工具（model_inspect）+ 模型生成脚本 + sklearn 导出工具
-tests/                  无依赖的单元测试（356 个用例，开启 OpenCV 时 367 个；另有 no-exceptions 子集 178 个）
+tests/                  无依赖的单元测试（条数见 docs/test-counts.md；另有 no-exceptions 子集）
 models/                 测试模型（脚本生成：7 种 ONNX 形态 + ml/ 下的 sklearn 演示模型与 golden）
 scripts/                构建脚本、ONNX Runtime / OpenCV 交叉编译脚本
 third_party/            由 resources/*.zip 自动解压（不入库）
@@ -254,6 +255,7 @@ docs/                   规划、API、构建、推理、OpenCV、板端验证�
 - [Int8 量化实测](docs/12-量化实测.md) —— 我们自己的工具测出来的 1.36~2.03×、
   为什么小模型反而更慢、为什么合成校准集不可信、以及 ARMv7 上别照搬 x86 数字
 - [串口通信](docs/13-串口通信.md) —— 为什么自己封 COM/termios、超时为什么不算错误、PTY 上怎么真测、板端 dialout/by-id/流控实践
+- [测试用例数](docs/test-counts.md) —— 由 `mylib_tests --list` 生成的单一来源；CI 校验，避免手写数字漂移
 
 ## 三方库来源
 

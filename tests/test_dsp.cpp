@@ -13,6 +13,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -1235,6 +1236,64 @@ MYTEST_CASE(dsp_slice_bits) {
     CHECK_EQ(static_cast<int>(bits[1]), 0);
     CHECK_EQ(static_cast<int>(bits[2]), 1);
     CHECK_EQ(static_cast<int>(bits[3]), 1);
+}
+
+// 回归：实测在 8192 点正弦里塞 1 个 NaN，analyze() 返回 Ok、classify() 给出
+// noise/confidence=1.000，detect_bursts 返回 8065 段，welch 全 NaN。NaN/Inf 必须在
+// 每个公开入口最前面就挡住，而不是让它们顺着 FFT/滤波器扩散。
+// 下面的输入本来都合法（长度、采样率、符号率都够），只塞 1 个非法样本，确保命中的
+// 是新增的有限性校验，而不是旧的参数检查。
+MYTEST_CASE(dsp_rejects_nan_input) {
+    const double      fs  = 8000.0;
+    const std::size_t bad = 1234;
+
+    Samples x = sine(100.0, fs, 4096);
+    x[bad]    = std::numeric_limits<float>::quiet_NaN();
+
+    auto invalid = [](const auto& r) {
+        return !r.ok() && r.status().code() == my::Errc::InvalidArgument;
+    };
+
+    CHECK(invalid(my::dsp::welch(x, fs, 256)));
+    CHECK(invalid(my::dsp::analyze(x, fs)));
+    CHECK(invalid(my::dsp::demod_am(x, fs)));
+    CHECK(invalid(my::dsp::demod_fm(x, fs)));
+    CHECK(invalid(my::dsp::demod_ask(x, fs, 1000.0)));
+    CHECK(invalid(my::dsp::demod_fsk(x, fs, 1000.0, 850.0, 750.0)));
+
+    // 复基带入口单独测：实部/虚部任一非有限都必须拒绝
+    CSamples cx(x.size());
+    for (std::size_t i = 0; i < x.size(); ++i) cx[i] = Complex(x[i], 0.0f);
+    cx[bad] = Complex(std::numeric_limits<float>::quiet_NaN(), 0.0f);
+    CHECK(invalid(my::dsp::demod_bpsk(cx, fs, 500.0)));
+
+    // 消息里要带第一个非法样本下标（板端排查坏帧时全靠它）
+    auto w = my::dsp::welch(x, fs, 256);
+    CHECK(!w.ok());
+    CHECK(w.status().message().find(std::to_string(bad)) != std::string::npos);
+
+    // detect_bursts 是裸 vector，没有 Status 通道；文档约定非有限输入返回空表，
+    // 不能让它继续产出 8065 个由 NaN 构成的假突发。
+    CHECK(my::dsp::detect_bursts(x, 64).empty());
+}
+
+MYTEST_CASE(dsp_rejects_inf_input) {
+    const double fs = 8000.0;
+
+    Samples x = sine(100.0, fs, 4096);
+    x[17]     = std::numeric_limits<float>::infinity();
+
+    auto invalid = [](const auto& r) {
+        return !r.ok() && r.status().code() == my::Errc::InvalidArgument;
+    };
+
+    CHECK(invalid(my::dsp::analyze(x, fs)));
+    CHECK(invalid(my::dsp::welch(x, fs, 256)));
+
+    // -Inf 同样必须被拦住（isfinite 一次检查两个方向）
+    x[17] = -std::numeric_limits<float>::infinity();
+    CHECK(invalid(my::dsp::analyze(x, fs)));
+    CHECK(invalid(my::dsp::welch(x, fs, 256)));
 }
 
 MYTEST_CASE(dsp_invalid_arguments) {

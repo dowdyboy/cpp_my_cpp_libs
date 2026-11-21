@@ -242,7 +242,7 @@ endif()
 
 | 阶段 | 内容 | 前置条件 | 状态 |
 |---|---|---|---|
-| **C0** | 纯数组预处理/后处理（§5） | 无 | ✅ **已完成**（`infer/preprocess.hpp`，25 个测试） |
+| **C0** | 纯数组预处理/后处理（§5） | 无 | ✅ **已完成**（`infer/preprocess.hpp`，条数见 [test-counts](test-counts.md)） |
 | **C1** | Windows 接官方预编译 OpenCV，跑通 `prepare()` | 下载 opencv-4.x-windows.exe | ✅ **已完成**（见 §8 实测） |
 | **C2** | Linux x86 接入（apt 或自编） | WSL 可用 | ✅ 已完成（armv7 交叉编译一并在 §3 完成） |
 | **C3** | Zynq 交叉编译 OpenCV（裁剪版） | PetaLinux SDK | ✅ **已完成**（2026-11-15，3 个 .so 共 5.9 MB，板端 8/8 通过） |
@@ -317,7 +317,7 @@ top-3: class #2 prob=0.1216 ...
 
 ### 8.4 测试
 
-`tests/test_cv.cpp` 11 个用例：
+`tests/test_cv.cpp` 的用例（条数见 [test-counts](test-counts.md)）：
 
 | 用例 | 验证点 |
 |---|---|
@@ -333,7 +333,7 @@ top-3: class #2 prob=0.1216 ...
 | `cv_utf8_path_roundtrip` | 中文路径 save/load（Windows imread/imwrite 的 ANSI 问题回归） |
 | `cv_prepare_rejects_huge_canvas` | 超大画布返回 `OutOfRange`，不抛异常 |
 
-### 8.5 下一步（C2/C3）
+### 8.5 C2/C3 复盘（均已完成）
 
 - **C2**：Linux x86。最省事是 WSL 里 `apt install libopencv-dev`，但版本（4.9）和 Windows 的 4.12 不一致，
   要做一次数值对齐验证（resize 的边界处理偶有差异）。

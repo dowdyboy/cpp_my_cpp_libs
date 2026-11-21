@@ -90,6 +90,11 @@ MYLIB_API bool  should_log(Level level) noexcept;
 /// 写出已格式化的消息。线程安全；未初始化时落到 stderr。
 MYLIB_API void write(Level level, std::string_view message) noexcept;
 
+/// 刷新日志（best effort，不会永久阻塞）。
+/// 同步模式下立即把已写内容刷到 sink；
+/// 异步模式下先把 flush 消息入队，再有界等待队列排空（最多 2 秒）——
+/// 超时也会返回，调用方不能依赖"返回时一定已全部落盘"。
+/// 进程退出前仍推荐显式调用 shutdown()。
 MYLIB_API void flush() noexcept;
 
 // -----------------------------------------------------------------------------

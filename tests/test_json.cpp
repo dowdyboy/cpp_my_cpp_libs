@@ -1,7 +1,9 @@
 #include "test_framework.hpp"
 
+#include <my_cpp_libs/json/config.hpp>
 #include <my_cpp_libs/json/json.hpp>
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 
@@ -316,5 +318,157 @@ MYTEST_CASE(json_set_failure_is_strong) {
     CHECK_EQ(d.type_of("x"), my::json::Type::String);
     CHECK_OK_VALUE(x, d.get<std::string>("x"));
     CHECK_EQ(x, std::string("str"));
+}
+
+// -----------------------------------------------------------------------------
+//  A11：深层嵌套在 parse 入口按词法深度上限拒绝（避免递归解析器爆栈）
+// -----------------------------------------------------------------------------
+// nlohmann 是递归下降解析器：`[`×15000 的 30 KB 输入会让进程以 0xC00000FD
+// （栈溢出）直接死掉，Result/异常都接不住。现在 parse 先做一遍纯词法扫描，
+// 深度上限 kMaxNestingDepth=256；扫描必须正确跳过字符串与转义。
+MYTEST_CASE(json_rejects_deep_nesting) {
+    const auto make_nested = [](std::size_t depth) {
+        std::string text;
+        text.reserve(depth * 2);
+        text.append(depth, '[');
+        text.append(depth, ']');
+        return text;
+    };
+
+    // 100 层在 256 上限内：正常解析
+    const auto shallow = Document::parse(make_nested(100));
+    CHECK(shallow.ok());
+    CHECK(shallow.value().is_array());
+
+    // 300 层超限：必须是 ParseError（不是进程崩溃），消息说明深度上限
+    const auto too_deep = Document::parse(make_nested(300));
+    CHECK(!too_deep.ok());
+    CHECK_EQ(too_deep.status().code(), my::Errc::ParseError);
+    CHECK(too_deep.status().message().find("深度") != std::string::npos);
+    CHECK(too_deep.status().message().find("256") != std::string::npos);
+
+    // 字符串里的括号不能计入深度：s 里放 300 个 '['，整体仍然只有 2 层结构；
+    // q 在 `\"`（转义引号）后再放 300 个 '['：扫描器若把转义引号当成字符串结束，
+    // 这 300 个 '[' 就会被误计成嵌套超限。
+    const std::string brackets(300, '[');
+    std::string       text = "{\"s\":\"";
+    text += brackets;
+    text += "\",\"q\":\"a\\\"";  // 追加 `","q":"a\"`，其中 \" 是 JSON 的转义引号
+    text += brackets;
+    text += "\",\"arr\":[[[1]]]}";
+    const auto doc = Document::parse(text);
+    CHECK(doc.ok());
+
+    CHECK_OK_VALUE(s, doc.value().get<std::string>("s"));
+    CHECK_EQ(s, brackets);
+    CHECK_OK_VALUE(q, doc.value().get<std::string>("q"));
+    CHECK_EQ(q, std::string("a\"") + brackets);
+    CHECK_OK_VALUE(inner, doc.value().get<int>("arr[0][0][0]"));
+    CHECK_EQ(inner, 1);
+}
+
+// -----------------------------------------------------------------------------
+//  A11 兜底：逃生舱（Document(Json)/raw()）可以造出超深 Json，merge_into 的
+//  递归也要有深度上限，超限返回 RuntimeError（parse 出来的文档不会走到这里）。
+// -----------------------------------------------------------------------------
+MYTEST_CASE(json_merge_depth_guard) {
+    // 构造 depth 层 `{"a":{"a":...}}`；每层都是对象，保证 merge_json 会一直递归
+    const auto make_deep = [](std::size_t depth) {
+        my::json::Json node = my::json::Json::object();
+        for (std::size_t i = 0; i < depth; ++i) {
+            my::json::Json parent = my::json::Json::object();
+            parent["a"]            = std::move(node);
+            node                   = std::move(parent);
+        }
+        return node;
+    };
+
+    Document base(make_deep(300));
+    Document overlay(make_deep(300));
+    const auto st = my::json::merge_into(base, overlay);
+    CHECK(!st.ok());
+    CHECK_EQ(st.code(), my::Errc::RuntimeError);
+    CHECK(st.message().find("深度") != std::string::npos);
+
+    // 正常深度照常合并
+    Document ok_base;
+    CHECK_OK(ok_base.set("a.b", 1));
+    Document ok_overlay;
+    CHECK_OK(ok_overlay.set("a.c", 2));
+    CHECK_OK(my::json::merge_into(ok_base, ok_overlay));
+    CHECK_OK_VALUE(b, ok_base.get<int>("a.b"));
+    CHECK_EQ(b, 1);
+    CHECK_OK_VALUE(c, ok_base.get<int>("a.c"));
+    CHECK_EQ(c, 2);
+}
+
+// -----------------------------------------------------------------------------
+//  A12：get<T> 的整型范围检查（越界/非整值返回 ParseError，不静默截断）
+// -----------------------------------------------------------------------------
+MYTEST_CASE(json_get_integer_range_checked) {
+    const auto r = Document::parse(R"({
+        "big": 70000,
+        "u32": 4294967296,
+        "huge": 1e300,
+        "frac": 1.9,
+        "answer": 42,
+        "whole": 42.0,
+        "neg": -1,
+        "imax": 2147483647,
+        "imin": -2147483648,
+        "u8max": 255,
+        "u8over": 256,
+        "three": 3
+    })");
+    CHECK(r.ok());
+    const auto& d = r.value();
+
+    // 超范围：unsigned short 只能到 65535（原实现会静默回绕成 4464）
+    const auto big = d.get<unsigned short>("big");
+    CHECK(!big.ok());
+    CHECK_EQ(big.status().code(), my::Errc::ParseError);
+    CHECK(big.status().message().find("big") != std::string::npos);      // 路径
+    CHECK(big.status().message().find("65535") != std::string::npos);    // 可接受范围
+
+    // int 放不下 2^32（原实现回绕成 0）
+    const auto u32 = d.get<int>("u32");
+    CHECK(!u32.ok());
+    CHECK_EQ(u32.status().code(), my::Errc::ParseError);
+
+    // 1e300 转 int 是 UB（原实现给出 INT_MIN 之类的结果）
+    const auto huge = d.get<int>("huge");
+    CHECK(!huge.ok());
+    CHECK_EQ(huge.status().code(), my::Errc::ParseError);
+
+    // 非整值浮点不能静默截断成 1
+    const auto frac = d.get<int>("frac");
+    CHECK(!frac.ok());
+    CHECK_EQ(frac.status().code(), my::Errc::ParseError);
+
+    // -1 不能转成无符号（原实现回绕成 UINT64_MAX）
+    const auto neg = d.get<std::uint64_t>("neg");
+    CHECK(!neg.ok());
+    CHECK_EQ(neg.status().code(), my::Errc::ParseError);
+
+    // 正常值与整值浮点
+    CHECK_OK_VALUE(answer, d.get<int>("answer"));
+    CHECK_EQ(answer, 42);
+    CHECK_OK_VALUE(whole, d.get<int>("whole"));
+    CHECK_EQ(whole, 42);
+    CHECK_OK_VALUE(three, d.get<double>("three"));
+    CHECK_NEAR(three, 3.0, 1e-12);
+
+    // int 的边界值必须通过
+    CHECK_OK_VALUE(imax, d.get<int>("imax"));
+    CHECK_EQ(imax, 2147483647);
+    CHECK_OK_VALUE(imin, d.get<int>("imin"));
+    CHECK_EQ(imin, -2147483647 - 1);
+
+    // char/unsigned char 也算整型，同样做范围检查
+    CHECK_OK_VALUE(u8max, d.get<unsigned char>("u8max"));
+    CHECK_EQ(u8max, static_cast<unsigned char>(255));
+    const auto u8over = d.get<unsigned char>("u8over");
+    CHECK(!u8over.ok());
+    CHECK_EQ(u8over.status().code(), my::Errc::ParseError);
 }
 

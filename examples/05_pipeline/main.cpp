@@ -49,7 +49,7 @@ std::vector<std::uint8_t> make_synthetic_image() {
 int main(int argc, char** argv) {
     my::log::Config lc;
     lc.level = my::log::Level::Info;
-    my::log::init(lc);
+    (void)my::log::init(lc);
 
     my::log::info("{}", my::BuildInfo::summary());
 

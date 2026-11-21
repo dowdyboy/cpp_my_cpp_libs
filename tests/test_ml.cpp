@@ -227,20 +227,88 @@ MYTEST_CASE(ml_missing_model_reports_not_found) {
     CHECK_EQ(r.status().code(), my::Errc::NotFound);
 }
 
+// B5 回归：显式给了 sidecar 路径但文件不存在，必须 NotFound，而不是静默忽略。
+// 这条不依赖 ORT：参数校验在创建推理 session 之前。
+MYTEST_CASE(ml_missing_explicit_sidecar_is_not_found) {
+    auto r = my::ml::Model::load(kModelDir + "iris_logreg.onnx", "no_such_meta.json");
+    CHECK(!r);
+    CHECK_EQ(r.status().code(), my::Errc::NotFound);
+}
+
+// 自动推导（sidecar 留空）时，同名 .json 缺失是合法的：
+// 模型维度静态就能用，只是拿不到特征名/类别名。为了避免读到模型旁的 .json，
+// 这里把 onnx 复制到一个没有 sidecar 的临时目录再加载。
 MYTEST_CASE(ml_works_without_sidecar) {
     if (!ml_ready()) MYTEST_SKIP("没有可用的推理后端");
 
-    // sidecar 指向不存在的文件：模型本身维度是静态的，应该还能用，
-    // 只是拿不到特征名/类别名。
-    ML_LOAD(m, (kModelDir + "iris_logreg.onnx"), "no_such_meta.json");
+    auto onnx_txt = my::io::read_file(kModelDir + "iris_logreg.onnx");
+    CHECK(onnx_txt.ok());
+    if (!onnx_txt.ok()) return;
+
+#if defined(_WIN32)
+    const std::string dir = std::string(std::getenv("TEMP") ? std::getenv("TEMP") : ".") +
+                            "\\mylib_ml_no_sidecar";
+#else
+    const std::string dir = std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp") +
+                            "/mylib_ml_no_sidecar";
+#endif
+    const std::string onnx_path = dir + "/iris_logreg.onnx";
+    (void)my::io::remove_all(dir);
+    CHECK(my::io::create_directories(dir).ok());
+    CHECK(my::io::write_file(onnx_path, onnx_txt.value()).ok());
+
+    auto loaded = my::ml::Model::load(onnx_path);   // sidecar 留空：自动推导，缺失允许
+    CHECK_RESULT(loaded);
+    auto& m = loaded.value();
     CHECK_EQ(m.meta().n_features, 4);
     CHECK(m.meta().classes.empty());
     CHECK(m.meta().sidecar_path.empty());
 
     auto r = m.predict_one({5.1f, 3.5f, 1.4f, 0.2f});
     CHECK_RESULT(r);
-    CHECK_EQ(r.value().label, std::int64_t{0});  // setosa
-    CHECK(r.value().label_name.empty());        // 没有类别名
+    CHECK_EQ(r.value().label, std::int64_t{0});   // setosa
+    CHECK(r.value().label_name.empty());         // 没有类别名
+
+    (void)my::io::remove_all(dir);
+}
+
+// A9 回归：sidecar 字段类型写错（{"name":123}）必须变成 ParseError。
+// 以前 load_sidecar 绕过 Document::get 直接 get<std::string>()，type_error 会从
+// Model::load 逸出，公共 API 的"不抛异常"承诺失效。
+MYTEST_CASE(ml_rejects_malformed_sidecar) {
+    if (!ml_ready()) MYTEST_SKIP("没有可用的推理后端");
+
+    auto onnx_txt = my::io::read_file(kModelDir + "iris_logreg.onnx");
+    CHECK(onnx_txt.ok());
+    if (!onnx_txt.ok()) return;
+
+#if defined(_WIN32)
+    const std::string dir = std::string(std::getenv("TEMP") ? std::getenv("TEMP") : ".") +
+                            "\\mylib_ml_bad_sidecar";
+#else
+    const std::string dir = std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp") +
+                            "/mylib_ml_bad_sidecar";
+#endif
+    const std::string onnx_path = dir + "/iris_logreg.onnx";
+    const std::string json_path = dir + "/bad_sidecar.json";
+    const std::string bad_json =
+        "{\n"
+        "  \"format\": \"my_cpp_libs.ml/1\",\n"
+        "  \"kind\": \"classifier\",\n"
+        "  \"input\": {\"n_features\": 4},\n"
+        "  \"output\": {\"items\": [{\"name\": 123, \"dtype\": \"float\"}]}\n"
+        "}\n";
+    (void)my::io::remove_all(dir);
+    CHECK(my::io::create_directories(dir).ok());
+    CHECK(my::io::write_file(onnx_path, onnx_txt.value()).ok());
+    CHECK(my::io::write_file(json_path, bad_json).ok());
+
+    // 关键：不抛异常，返回 ParseError
+    auto bad = my::ml::Model::load(onnx_path, json_path);
+    CHECK(!bad);
+    CHECK_EQ(bad.status().code(), my::Errc::ParseError);
+
+    (void)my::io::remove_all(dir);
 }
 
 MYTEST_CASE(ml_sidecar_mismatch_is_rejected) {

@@ -65,9 +65,14 @@ if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git/HEAD")
             string(APPEND MYLIB_GIT_COMMIT "-dirty")
         endif()
     endif()
-    # commit 变化时自动重新 configure，否则 BuildInfo 里会一直是旧 hash
+    # commit 变化时自动重新 configure，否则 BuildInfo 里会一直是旧 hash。
+    # 注意：`.git/HEAD` 在"同一个分支上又提交一次"时内容不变（始终是
+    # "ref: refs/heads/main"），所以必须同时监视分支 ref 与 index。
+    file(GLOB _mylib_git_refs "${CMAKE_CURRENT_SOURCE_DIR}/.git/refs/heads/*")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/.git/HEAD")
+        "${CMAKE_CURRENT_SOURCE_DIR}/.git/HEAD"
+        "${CMAKE_CURRENT_SOURCE_DIR}/.git/index"
+        ${_mylib_git_refs})
 endif()
 
 # -----------------------------------------------------------------------------
@@ -127,7 +132,7 @@ if(MYLIB_SANITIZE)
             target_link_options(mylib_sanitize INTERFACE -fsanitize=thread)
             message(STATUS "Sanitizer       : thread (TSan)")
         else()
-            message(WARNING "未知的 MYLIB_SANITIZE=${MYLIB_SANITIZE}，可选：address / undefined")
+            message(WARNING "未知的 MYLIB_SANITIZE=${MYLIB_SANITIZE}，可选：address / undefined / thread")
         endif()
     endif()
 endif()
@@ -165,6 +170,47 @@ endif()
 if(MYLIB_INSTALL)
     include(GNUInstallDirs)
     include(CMakePackageConfigHelpers)
+
+    # ---- BUILD-INFO.txt：包内可直接读的构建身份 ----
+    # CPack 的 CPACK_PACKAGE_DESCRIPTION 对 ZIP/TGZ 不生成文件；没有这个文件时，
+    # 拿到 SDK 的人只能链一个程序跑 BuildInfo::summary() 才知道包是哪次构建。
+    set(_mylib_components "")
+    foreach(_t ${MYLIB_EFFECTIVE_TARGETS})
+        string(REPLACE "mylib_" "" _c "${_t}")
+        string(APPEND _mylib_components "${_c} ")
+    endforeach()
+    string(STRIP "${_mylib_components}" _mylib_components)
+    if(MYLIB_INFER_BACKEND STREQUAL "onnxruntime")
+        set(_mylib_infer_desc "onnxruntime")
+    elseif(MYLIB_HAVE_NCNN)
+        set(_mylib_infer_desc "ncnn")
+    else()
+        set(_mylib_infer_desc "stub/off")
+    endif()
+    if(MYLIB_ORT_ROOT_DETECTED)
+        get_filename_component(_mylib_ort_name "${MYLIB_ORT_ROOT_DETECTED}" NAME)
+    else()
+        set(_mylib_ort_name "none")
+    endif()
+    if(MYLIB_HAVE_CV)
+        set(_mylib_cv_desc "on")
+    else()
+        set(_mylib_cv_desc "off")
+    endif()
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/BUILD-INFO.txt"
+"my_cpp_libs ${PROJECT_VERSION}
+commit:        ${MYLIB_GIT_COMMIT}
+build type:    ${MYLIB_BUILD_TYPE_STR}
+compiler:      ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}
+target:        ${CMAKE_SYSTEM_PROCESSOR}-${CMAKE_SYSTEM_NAME} (${CMAKE_SIZEOF_VOID_P} bytes)
+cross compiled: ${CMAKE_CROSSCOMPILING}
+components:    ${_mylib_components}
+infer backend: ${_mylib_infer_desc}
+onnxruntime:   ${_mylib_ort_name}
+opencv:        ${_mylib_cv_desc}
+generated:     ${CMAKE_CURRENT_BINARY_DIR}/BUILD-INFO.txt
+")
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/BUILD-INFO.txt" DESTINATION .)
 
     install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
     install(TARGETS ${MYLIB_EFFECTIVE_TARGETS}

@@ -135,6 +135,13 @@ Status save(const std::string& path, const Image& image) {
 }
 
 Result<PreparedImage> prepare(const Image& src, const PreprocessSpec& spec) {
+    // 只支持 8 位图像：IMREAD_UNCHANGED 读出的 16U/32F 图，在 letterbox 分支会被
+    // convertTo 饱和成 8U，在拉伸分支会被当成 u8 字节读 —— 都不报错、只出错误结果。
+    // 类型不符必须在这里明确拒绝，转换责任交给调用方。
+    if (src.depth() != CV_8U) {
+        return Status(Errc::Unsupported,
+                      "prepare 只支持 8 位图像（当前 depth=" + std::to_string(src.depth()) + "）");
+    }
     if (spec.input_width <= 0 || spec.input_height <= 0) {
         return Status(Errc::InvalidArgument, "目标尺寸非法");
     }

@@ -440,6 +440,39 @@ MYTEST_CASE(serial_pty_close_then_io_fails) {
     CHECK_EQ(wr.status().code(), my::Errc::NotInitialized);
 }
 
+// 回归：PTY master 关闭（对端"拔线"）后，slave 的 poll 会立刻返回 POLLHUP，
+// 随后 read() 返回 0。修复前只等 POLLIN、不看 revents，read_some(500ms) 在 µs 级
+// 返回 Ok/0，文档推荐的 `if (n == 0) continue;` 会 100% CPU 空转。
+// 现在必须立刻报 Errc::IoError，而不是等满 500ms 超时或返回 0 字节。
+MYTEST_CASE(serial_pty_peer_close_reports_io_error) {
+    PtyPair pty;
+    if (!make_pty(pty)) MYTEST_SKIP("本机无法创建 PTY");
+
+    CHECK_OK_VALUE(port, ms::Port::open(pty.slave_path));
+
+    // 关闭 master，相当于对端设备断开
+    const int close_rc = ::close(pty.master);
+    pty.master         = -1;  // 避免析构时重复 close（fd 可能已被别的线程复用）
+    CHECK_EQ(close_rc, 0);
+
+    std::uint8_t buf[16] = {};
+    const auto   t0      = std::chrono::steady_clock::now();
+    auto         rd      = port.read_some(buf, sizeof buf, 500ms);
+    const auto   elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count();
+
+    CHECK(!rd.ok());
+    CHECK_EQ(rd.status().code(), my::Errc::IoError);
+    CHECK(elapsed < 200);  // 挂断必须立刻返回，不能等满 500ms
+    CHECK(rd.status().message().find("挂断") != std::string::npos ||
+          rd.status().message().find("EOF") != std::string::npos);
+
+    // read_line 同样要把挂断透传成错误，不能返回空串 + Ok 让上层继续轮询
+    auto line = port.read_line('\n', 64, 500ms);
+    CHECK(!line.ok());
+}
+
 MYTEST_CASE(serial_pty_write_all_times_out_when_peer_never_reads) {
     PtyPair pty;
     if (!make_pty(pty)) MYTEST_SKIP("本机无法创建 PTY");
@@ -507,6 +540,9 @@ MYTEST_CASE(serial_pty_write_some_timeout_is_bounded) {
     MYTEST_SKIP("Windows 上需要虚拟串口驱动");
 }
 MYTEST_CASE(serial_pty_two_ports_are_independent) {
+    MYTEST_SKIP("Windows 上需要虚拟串口驱动");
+}
+MYTEST_CASE(serial_pty_peer_close_reports_io_error) {
     MYTEST_SKIP("Windows 上需要虚拟串口驱动");
 }
 

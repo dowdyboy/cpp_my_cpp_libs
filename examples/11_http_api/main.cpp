@@ -26,10 +26,10 @@ using namespace std::chrono_literals;
 /// 板端要上报的一份数据
 my::json::Document make_telemetry() {
     my::json::Document doc;
-    doc.set("device", "zynq-7020");
-    doc.set("temp_c", 36.5);
-    doc.set("vib", 0.021);
-    doc.set("ts", 1720000000);
+    (void)doc.set("device", "zynq-7020");
+    (void)doc.set("temp_c", 36.5);
+    (void)doc.set("vib", 0.021);
+    (void)doc.set("ts", 1720000000);
     return doc;
 }
 
@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
     my::log::Config cfg;
     cfg.level      = my::log::Level::Info;
     cfg.to_console = true;
-    my::log::init(cfg);
+    (void)my::log::init(cfg);
 
     // -------------------------------------------------------------------------
     // 1. 板端 HTTP 服务端
@@ -56,9 +56,9 @@ int main(int argc, char** argv) {
 
     server.value().get("/status", [](const my::http::Request&, my::http::Response& res) {
         my::json::Document doc;
-        doc.set("ok", true);
-        doc.set("uptime_s", 1234);
-        doc.set("backend", "my::http");
+        (void)doc.set("ok", true);
+        (void)doc.set("uptime_s", 1234);
+        (void)doc.set("backend", "my::http");
         res.set_json(doc);
     });
 
@@ -69,8 +69,8 @@ int main(int argc, char** argv) {
             return;
         }
         my::json::Document out;
-        out.set("received", doc.value().get_or<std::string>("device", "?"));
-        out.set("value", doc.value().get_or<double>("temp_c", 0.0));
+        (void)out.set("received", doc.value().get_or<std::string>("device", "?"));
+        (void)out.set("value", doc.value().get_or<double>("temp_c", 0.0));
         res.set_json(out);
     });
 
