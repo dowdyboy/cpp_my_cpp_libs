@@ -22,5 +22,6 @@ cmake --build "$BUILD" -j "$(nproc)" 2>&1 | tail -3
 echo "==> 运行测试"
 cd "$BUILD"
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=0 \
+LSAN_OPTIONS="suppressions=$SRC/tests/lsan.supp" \
 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=0 \
     ./bin/mylib_tests 2>&1 | tail -40

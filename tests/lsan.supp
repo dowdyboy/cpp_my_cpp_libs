@@ -1,0 +1,15 @@
+# LeakSanitizer 抑制清单（CI 的 linux-asan job 与 scripts/run-tests-asan-wsl.sh 使用）
+#
+# 原则：只抑制"进程生命周期单例的有意泄漏"，并且必须写清楚为什么它不是 bug。
+# 新增条目时请把分配点与原因一起写下来。
+
+# my::BuildInfo::summary() 故意把 std::string 泄漏到进程结束（build_info.cpp:87）。
+#
+# 原因：summary() 可能在**其它静态对象的析构函数**里被调用（例如日志/诊断对象退出时
+# 打最后一行）。函数内静态 std::string 会先于这些对象被销毁，返回的 c_str() 就悬垂；
+# 而让它永远不析构是唯一能保证"任何阶段调用都安全"的写法（与 log::State 同理）。
+# 代价是 32 字节/进程，LSan 会把它报成 direct leak。这里按函数名抑制，不按文件全禁。
+leak:my::BuildInfo::summary
+
+# 兜底：部分平台的栈回溯只显示源文件而不显示完整函数名。
+leak:build_info.cpp

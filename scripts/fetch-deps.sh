@@ -150,12 +150,17 @@ PY
 fetch_pocketfft
 
 if [ "$WITH_ORT_WIN" = "1" ]; then
-    # 这个直链在 2026-11-20 实测 404（多个版本都试过）。下载失败只告警：
-    # 拿不到 ORT 时 infer 退回 stub、ml 用例跳过，不该让 CI 因此变红。
-    if ! fetch onnxruntime-win-x64-1.23.2.zip \
-          "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip"; then
+    # 上游 microsoft/onnxruntime 的 GitHub Releases 在 2026-11-17 起不可用（404）。
+    # 默认走本仓库固定版本的 release 资产（与官方 zip 同 SHA256）；可用
+    # MYLIB_ORT_WIN_URL 覆盖。下载失败只告警：拿不到 ORT 时 infer 退回 stub。
+    ort_url="${MYLIB_ORT_WIN_URL:-https://github.com/dowdyboy/cpp_my_cpp_libs/releases/download/deps-ort-1.23.2/onnxruntime-win-x64-1.23.2.zip}"
+    if ! fetch onnxruntime-win-x64-1.23.2.zip "$ort_url"; then
         echo "[warn] ONNX Runtime 下载失败 —— infer 会退回 stub，ml 用例将跳过" >&2
         if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::warning::ONNX Runtime 预编译包下载失败：ml 用例本轮将跳过"; fi
+    elif ! echo "0b38df9af21834e41e73d602d90db5cb06dbd1ca618948b8f1d66d607ac9f3cd  $ROOT/resources/onnxruntime-win-x64-1.23.2.zip" | sha256sum -c -; then
+        echo "[warn] ONNX Runtime zip 的 SHA256 不匹配（镜像内容不对？）" >&2
+        rm -f "$ROOT/resources/onnxruntime-win-x64-1.23.2.zip"
+        if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::warning::ONNX Runtime zip 校验失败，已删除"; fi
     fi
 fi
 

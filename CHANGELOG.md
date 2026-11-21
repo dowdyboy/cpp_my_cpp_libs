@@ -104,6 +104,22 @@
 | `-fno-exceptions` 子集 | **194/194 通过**（192 用例 + 2 守卫；net_server 不参与） |
 | 标准向量 | CRC check 值 / RFC 4648 base64 / COBS 规范向量全过；PC 探针验证 SIGABRT/SEH/栈溢出都能打印现场 |
 
+### CI 修复（2026-11-21）
+
+1. **Linux ASan 误报**：`BuildInfo::summary()` 故意把 `std::string` 泄漏到进程结束
+   （保证"其它静态对象析构时调用 summary()"不悬垂），LeakSanitizer 把它判成 direct leak，
+   导致 `build_info` / `crash_install_uninstall_is_idempotent` 两个用例失败。
+   新增 `tests/lsan.supp`（只按 `my::BuildInfo::summary` / `build_info.cpp` 抑制，并写明原因），
+   CI ASan job 与 `scripts/run-tests-asan-wsl.sh` 通过 `LSAN_OPTIONS=suppressions=...` 使用。
+2. **Windows ORT 下载 404**：上游 `microsoft/onnxruntime` 的 GitHub Releases 自
+   2026-11-17 起不可用，`windows-msvc` / `package-windows` 卡在 fetch-deps。
+   把官方 `onnxruntime-win-x64-1.23.2.zip`（SHA256 `0b38df9a…c3cd`，78 MB）作为
+   本仓库 release 资产 `deps-ort-1.23.2` 固定下来；`fetch-deps.ps1` / `fetch-deps.sh`
+   默认改用它并**校验 SHA256**，仍可用 `-OrtWinUrl` / `MYLIB_ORT_WIN_URL` 覆盖成镜像。
+
+验证：WSL Debug+ASan 下两个原先失败的用例通过（LSan 输出 `Suppressions used:
+build_info.cpp`）；`fetch-deps.ps1 -WithOrtWin -RequireOrtWin` 通过本地 SHA256 校验。
+
 ### 第三轮巡检（2026-11-20）
 
 这一轮先把审计里的 A 级问题全部修掉（问题清单与证据见 `assess/audit-2026-11-20.md`）：

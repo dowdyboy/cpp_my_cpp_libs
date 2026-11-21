@@ -19,8 +19,10 @@ param(
     [switch] $WithOrtWin,
     # CI / 发布用：ORT 下载失败必须让任务失败，而不是让 ml 静默 skip。
     [switch] $RequireOrtWin,
-    # 官方直链会变；CI 可用仓库变量覆盖（不改脚本）。
-    [string] $OrtWinUrl = 'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip'
+    # 上游 microsoft/onnxruntime 的 GitHub Releases 在 2026-11-17 起不可用（仓库/资产 404）。
+    # 默认改用本仓库固定版本的 release 资产（内容与官方 zip 一致，SHA256 见下）；
+    # CI 仍可用仓库变量 MYLIB_ORT_WIN_URL / -OrtWinUrl 覆盖成别的镜像。
+    [string] $OrtWinUrl = 'https://github.com/dowdyboy/cpp_my_cpp_libs/releases/download/deps-ort-1.23.2/onnxruntime-win-x64-1.23.2.zip'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -95,12 +97,21 @@ Fetch 'spdlog-1.17.0.zip' 'https://github.com/gabime/spdlog/archive/refs/tags/v1
 Fetch 'json-include.zip'  'https://github.com/nlohmann/json/releases/download/v3.12.0/include.zip'
 
 if ($WithOrtWin -or $RequireOrtWin) {
-    # 注意：官方直链会随发布位置变化（本文件曾记录 v1.23.2 直链 404）。
+    # 注意：官方直链 2026-11-17 起 404（上游 release 不可用），默认走本仓库的固定资产。
     # 本地默认容忍失败；CI/发布传 -RequireOrtWin，拿不到 ORT 必须让任务失败，
     # 否则 ml 的 golden 用例会静默 skip，而流水线仍然全绿。
     try {
         $ortName = Split-Path $OrtWinUrl -Leaf
         Fetch $ortName $OrtWinUrl
+        # 固定版本 + 固定摘要：mirror/缓存拿到的内容必须与官方 1.23.2 完全一致。
+        $ortSha = '0b38df9af21834e41e73d602d90db5cb06dbd1ca618948b8f1d66d607ac9f3cd'
+        $ortPath = Join-Path (Join-Path $PSScriptRoot '..\resources') $ortName
+        if (Test-Path $ortPath) {
+            $actual = (Get-FileHash $ortPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $ortSha) {
+                throw "$ortName 的 SHA256 不匹配：期望 $ortSha，实际 $actual（镜像内容不对？）"
+            }
+        }
     } catch {
         if ($RequireOrtWin) {
             throw "ONNX Runtime 下载失败（$($_.Exception.Message)）。CI/发布要求必须有 ORT；" +

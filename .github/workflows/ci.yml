@@ -110,6 +110,8 @@ jobs:
       - name: Test
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          # BuildInfo::summary() 的有意单例泄漏（见 tests/lsan.supp 的说明）
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/lsan.supp
         run: ctest --test-dir build/ci-asan --output-on-failure
 
   # ---------------------------------------------------------------- 最小配置（组件裁剪矩阵）
