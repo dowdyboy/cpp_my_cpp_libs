@@ -69,7 +69,9 @@ if(MYLIB_INSTALL)
                 DESTINATION "${_lic_dir}")
     endif()
 
-    # 装一个三方许可证：从候选路径里挑第一个存在的
+    # 装一个三方许可证：从候选路径里挑第一个存在的。
+    # 找不到就是发布缺陷（README 里"出现 [pkg] 找不到许可证 就不要发布"），
+    # 因此这里直接 FAIL，而不是只打一行容易被忽略的 WARNING。
     function(_mylib_install_license _dest_name)
         foreach(_cand ${ARGN})
             if(EXISTS "${_cand}")
@@ -77,7 +79,15 @@ if(MYLIB_INSTALL)
                 return()
             endif()
         endforeach()
-        message(WARNING "[pkg] 找不到许可证 ${_dest_name}（候选: ${ARGN}）")
+        # 兜底：随仓库提交的许可证副本（用于自编的 armv7 ORT 这类没带 LICENSE 的产物）
+        set(_fallback "${PROJECT_SOURCE_DIR}/cmake/licenses/${_dest_name}")
+        if(EXISTS "${_fallback}")
+            install(FILES "${_fallback}" DESTINATION "${_lic_dir}" RENAME "${_dest_name}")
+            return()
+        endif()
+        message(FATAL_ERROR
+            "[pkg] 找不到许可证 ${_dest_name}（候选: ${ARGN}，兜底: ${_fallback}）。"
+            "缺许可证的包不应发布；补齐候选路径或 cmake/licenses/ 下的兜底文件。")
     endfunction()
 
     if(TARGET mylib_log)
@@ -131,10 +141,9 @@ if(MYLIB_INSTALL)
         _mylib_install_license("onnxruntime-LICENSE"
             "${MYLIB_ORT_ROOT_DETECTED}/LICENSE"
             "${MYLIB_ORT_ROOT_DETECTED}/LICENSE.txt")
-        if(EXISTS "${MYLIB_ORT_ROOT_DETECTED}/ThirdPartyNotices.txt")
-            install(FILES "${MYLIB_ORT_ROOT_DETECTED}/ThirdPartyNotices.txt"
-                    DESTINATION "${_lic_dir}" RENAME "onnxruntime-ThirdPartyNotices.txt")
-        endif()
+        _mylib_install_license("onnxruntime-ThirdPartyNotices.txt"
+            "${MYLIB_ORT_ROOT_DETECTED}/ThirdPartyNotices.txt"
+            "${MYLIB_ORT_ROOT_DETECTED}/ThirdPartyNotices")
     endif()
 
     if(TARGET deps::ncnn AND MYLIB_NCNN_ROOT_DETECTED)
@@ -148,7 +157,8 @@ if(MYLIB_INSTALL)
         _mylib_install_license("opencv-LICENSE"
             "${PROJECT_SOURCE_DIR}/third_party/opencv-4.12.0/opencv/build/LICENSE"
             "${PROJECT_SOURCE_DIR}/third_party/opencv-4.12.0/opencv/LICENSE"
-            "${MYLIB_OPENCV_ROOT}/LICENSE")
+            "${MYLIB_OPENCV_ROOT}/LICENSE"
+            "/usr/share/doc/libopencv-dev/copyright")
     endif()
 endif()
 

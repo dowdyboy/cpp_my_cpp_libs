@@ -317,7 +317,7 @@ top-3: class #2 prob=0.1216 ...
 
 ### 8.4 测试
 
-`tests/test_cv.cpp` 8 个用例：
+`tests/test_cv.cpp` 11 个用例：
 
 | 用例 | 验证点 |
 |---|---|
@@ -326,7 +326,12 @@ top-3: class #2 prob=0.1216 ...
 | `cv_prepare_letterbox` | 160x120→32x32：scale=0.2、pad_y=4、NCHW 排布、填充区=114/255 |
 | `cv_prepare_stretch` | 直接拉伸时无 padding |
 | `cv_prepare_gray_input` | 灰度图自动转 3 通道 |
+| `cv_prepare_gray_model` | 灰度模型（input_channels=1）的 1 通道输出 |
+| `cv_prepare_rgba_order_follows_src_order` | 4 通道按 BGRA/RGBA 各自的 src_order 处理 |
+| `cv_prepare_letterbox_uses_rounded_scale` | scale_x/scale_y 用取整后的实际比例，与 my::image 一致 |
 | `cv_unletterbox_boxes` | 坐标逆变换数值正确 |
+| `cv_utf8_path_roundtrip` | 中文路径 save/load（Windows imread/imwrite 的 ANSI 问题回归） |
+| `cv_prepare_rejects_huge_canvas` | 超大画布返回 `OutOfRange`，不抛异常 |
 
 ### 8.5 下一步（C2/C3）
 

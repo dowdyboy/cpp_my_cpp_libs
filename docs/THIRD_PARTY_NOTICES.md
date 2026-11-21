@@ -15,7 +15,7 @@
 | cpp-httplib | 0.66.0 | MIT | 编进 `libmy_cpp_libs_http` | `cpp-httplib-LICENSE` |
 | stb_image / stb_image_write | 2.32 / 1.18 | MIT（或公有领域，二选一） | 编进 `libmy_cpp_libs_image` + `libmylib_stb_impl` | `sources/stb_image.h`、`sources/stb_image_write.h`（声明在文件头） |
 | pocketfft | git 4d865cb | BSD-3-Clause | 编进 `libmy_cpp_libs_dsp` | `sources/pocketfft_hdronly.h`（声明在文件头） |
-| ONNX Runtime | 1.23.2（x64）/ 1.18.1（armv7）/ 1.19.2（aarch64） | Apache-2.0 | 动态库（`lib/` 或 `bin/`）+ 导入库 | `onnxruntime-LICENSE`（+ `onnxruntime-ThirdPartyNotices.txt`） |
+| ONNX Runtime | 1.23.2（x64）/ 1.18.1（armv7）/ 1.19.2（aarch64） | MIT | 动态库（`lib/` 或 `bin/`）+ 导入库 | `onnxruntime-LICENSE`（+ `onnxruntime-ThirdPartyNotices.txt`） |
 | OpenCV | 4.12.0 | Apache-2.0 | 动态库（`lib/` 或 `bin/`）+ 头文件 | `opencv-LICENSE` |
 | ncnn（**不随包分发**） | 20250503 | BSD-3-Clause | 源码构建时才用；许可证原文仍随包附带 | `ncnn-LICENSE.txt` |
 
@@ -23,13 +23,15 @@
 
 ## 再分发注意事项
 
-1. **Apache-2.0（ONNX Runtime / OpenCV）**：再分发时必须随附 `LICENSE` 与 `NOTICE`
-   （ONNX Runtime 的 `ThirdPartyNotices.txt` 已在包内）。修改过的文件需要显著标注。
+1. **ONNX Runtime（MIT）/ OpenCV（Apache-2.0）**：再分发时必须随附各自的 `LICENSE` 与
+   NOTICE（ONNX Runtime 的 `ThirdPartyNotices.txt` 已在包内；OpenCV 为 Apache-2.0，需要保留 NOTICE）。
+   修改过的文件需要显著标注。
 2. **MPL-2.0（Eigen）**：MPL 是**文件级** copyleft。本包只是以头文件形式分发 Eigen 未修改的
    源码，因此不触发源码公开义务；如果你修改了 Eigen 的文件，必须公开被修改的那些文件。
 3. **MIT / BSD-3**：保留版权声明与许可证原文即可（本目录已提供）。
-4. 打包脚本（`cmake/Packaging.cmake`）会在缺任何许可证文件时打印 WARNING ——
-   如果打包日志里出现 `[pkg] 找不到许可证 ...`，说明这个包不该发布。
+4. 打包脚本（`cmake/Packaging.cmake`）在缺任何许可证文件时会直接 `FATAL_ERROR`：
+   缺许可证的包不应该存在。若遇到自编依赖没带 LICENSE，可在 `cmake/licenses/` 放兜底副本
+   （ONNX Runtime 的 MIT LICENSE 与 ThirdPartyNotices 已随仓库提供）。
 
 ## 各组件的上游地址
 

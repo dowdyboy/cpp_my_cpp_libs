@@ -59,7 +59,8 @@ struct Config {
     StopBits      stop_bits = StopBits::One;
     Flow          flow      = Flow::None;
     /// POSIX：加 TIOCEXCL（独占，别的进程再打开会失败，避免两边抢同一个口）；
-    /// Windows：CreateFile 时 dwShareMode=0（同样效果）。
+    /// Windows：CreateFile 的 dwShareMode=0（同样效果）。false 时允许其它进程同时打开
+    /// （调试/监视场景；两边同时写会互相穿插，调用方自己负责）。
     bool exclusive = true;
 };
 
@@ -121,12 +122,13 @@ public:
 
     /// 尽量写出去，返回实际写入的字节数。**超时返回已写部分、status 仍为 Ok** ——
     /// 串口写超时通常只是"对端没读 / 流控压住"，是不是要重试由调用方决定。
+    /// timeout < 0 表示无限等待；0 表示"尽量不阻塞"（Windows 用 1ms 分片，POSIX poll(0)）。
     /// 只有真正的错误（未打开、设备消失）才返回 Status。
     Result<std::size_t> write_some(const void* buf, std::size_t n,
                                    std::chrono::milliseconds timeout);
 
-    /// 循环写直到写完；写不完返回 Errc::Timeout（消息里带 "已写 X/Y 字节"）。
-    /// 想自己控制重试节奏就用 write_some()。
+    /// 循环写直到写完；**timeout 是整次调用的总预算**，写不完返回 Errc::Timeout
+    /// （消息里带 "已写 X/Y 字节"）。想自己控制重试节奏就用 write_some()。
     Status write_all(const void* buf, std::size_t n, std::chrono::milliseconds timeout);
 
     /// 读一行（不含行尾）。遇到 delim、读满 max_len、或超时即返回。

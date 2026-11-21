@@ -4,10 +4,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <system_error>
 #include <utility>
 
@@ -17,7 +20,8 @@
 #    endif
 #    include <windows.h>
 #else
-#    include <string>
+#    include <fcntl.h>
+#    include <unistd.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -34,14 +38,31 @@ Status from_ec(const std::error_code& ec, const char* what, std::string_view pat
                                      ec.message() + "）");
 }
 
-/// 生成不冲突的临时文件名。用"毫秒时间戳 + 进程内自增"而不是 PID：
-/// 不依赖 <unistd.h>，MinGW/MSVC 都能编；同目录并发写靠自增区分。
+/// 生成不冲突的临时文件名。毫秒时间戳 + 进程 ID + 进程内自增：
+/// 只靠进程内自增无法避免两个进程在同一毫秒撞名（write_file 的临时名因此会互相覆盖）。
 std::string temp_suffix() {
     static std::atomic<std::uint64_t> counter{0};
     const auto now = std::chrono::steady_clock::now().time_since_epoch();
     const auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
-    return std::to_string(ms) + "-" + std::to_string(counter.fetch_add(1));
+#if defined(_WIN32)
+    const unsigned long pid = ::GetCurrentProcessId();
+#else
+    const unsigned long pid = static_cast<unsigned long>(::getpid());
+#endif
+    return std::to_string(ms) + "-" + std::to_string(pid) + "-" +
+           std::to_string(counter.fetch_add(1));
 }
+
+void remove_quiet(const std::string& path) noexcept {
+    std::error_code ec;
+    fs::remove(to_path(path), ec);
+}
+
+#if !defined(_WIN32)
+std::string errno_text(int e) {
+    return std::string(std::strerror(e)) + " (errno=" + std::to_string(e) + ")";
+}
+#endif
 
 Status write_raw(const std::string& path, std::string_view data, bool append) {
     std::ios::openmode mode = std::ios::binary | std::ios::out;
@@ -54,15 +75,136 @@ Status write_raw(const std::string& path, std::string_view data, bool append) {
     return Ok();
 }
 
+/// 创建临时文件并写入 + fsync。独占创建：同名已存在时返回 AlreadyExists，
+/// 调用方换一个名字重试。任何一步失败都会清掉半截临时文件。
+Status write_new_sync(const std::string& path, std::string_view data) {
+#if defined(_WIN32)
+    const std::wstring wpath = to_path(path).native();
+    HANDLE h = ::CreateFileW(wpath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                             FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        const DWORD e = ::GetLastError();
+        if (e == ERROR_FILE_EXISTS || e == ERROR_ALREADY_EXISTS) {
+            return Status(Errc::AlreadyExists, "临时文件已存在: " + path);
+        }
+        return Status(Errc::IoError,
+                      "无法创建临时文件: " + path + "（GetLastError=" + std::to_string(e) + "）");
+    }
+
+    const char* p    = data.data();
+    std::size_t left = data.size();
+    while (left > 0) {
+        const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(
+            left, static_cast<std::size_t>(std::numeric_limits<DWORD>::max())));
+        DWORD written = 0;
+        if (!::WriteFile(h, p, chunk, &written, nullptr)) {
+            const DWORD e = ::GetLastError();
+            ::CloseHandle(h);
+            remove_quiet(path);
+            return Status(Errc::IoError,
+                          "写入临时文件失败: " + path + "（GetLastError=" + std::to_string(e) + "）");
+        }
+        if (written == 0) {
+            ::CloseHandle(h);
+            remove_quiet(path);
+            return Status(Errc::IoError, "写入临时文件失败（WriteFile 无进展）: " + path);
+        }
+        p += written;
+        left -= written;
+    }
+    if (!::FlushFileBuffers(h)) {
+        const DWORD e = ::GetLastError();
+        ::CloseHandle(h);
+        remove_quiet(path);
+        return Status(Errc::IoError,
+                      "刷新临时文件失败: " + path + "（GetLastError=" + std::to_string(e) + "）");
+    }
+    if (!::CloseHandle(h)) {
+        remove_quiet(path);
+        return Status(Errc::IoError, "关闭临时文件失败: " + path);
+    }
+    return Ok();
+#else
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666);
+    if (fd < 0) {
+        if (errno == EEXIST) return Status(Errc::AlreadyExists, "临时文件已存在: " + path);
+        return Status(Errc::IoError, "无法创建临时文件: " + path + "（" + errno_text(errno) + "）");
+    }
+
+    const char* p    = data.data();
+    std::size_t left = data.size();
+    while (left > 0) {
+        const ssize_t n = ::write(fd, p, left);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            const int e = errno;
+            ::close(fd);
+            remove_quiet(path);
+            return Status(Errc::IoError, "写入临时文件失败: " + path + "（" + errno_text(e) + "）");
+        }
+        if (n == 0) {
+            ::close(fd);
+            remove_quiet(path);
+            return Status(Errc::IoError, "写入临时文件失败（write 无进展）: " + path);
+        }
+        p += n;
+        left -= static_cast<std::size_t>(n);
+    }
+    if (::fsync(fd) != 0) {
+        const int e = errno;
+        ::close(fd);
+        remove_quiet(path);
+        return Status(Errc::IoError, "刷新临时文件失败: " + path + "（" + errno_text(e) + "）");
+    }
+    if (::close(fd) != 0) {
+        remove_quiet(path);
+        return Status(Errc::IoError, "关闭临时文件失败: " + path);
+    }
+    return Ok();
+#endif
+}
+
+/// 把同目录临时文件原子替换为目标文件，并尽量把目录项也刷盘。
+Status replace_sync(const std::string& tmp, const std::string& target) {
+#if defined(_WIN32)
+    const std::wstring wtmp    = to_path(tmp).native();
+    const std::wstring wtarget = to_path(target).native();
+    if (!::MoveFileExW(wtmp.c_str(), wtarget.c_str(),
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const DWORD e = ::GetLastError();
+        return Status(Errc::IoError,
+                      "原子替换失败: " + target + "（GetLastError=" + std::to_string(e) + "）");
+    }
+    return Ok();
+#else
+    if (::rename(tmp.c_str(), target.c_str()) != 0) {
+        return Status(Errc::IoError, "原子替换失败: " + target + "（" + errno_text(errno) + "）");
+    }
+    // rename 的持久化还依赖父目录 fsync；失败不视为写失败（部分文件系统不支持）。
+    std::string parent = from_path(to_path(target).parent_path());
+    if (parent.empty()) parent = ".";
+    int dfd = ::open(parent.c_str(), O_RDONLY
+#    if defined(O_DIRECTORY)
+                                       | O_DIRECTORY
+#    endif
+    );
+    if (dfd >= 0) {
+        (void)::fsync(dfd);
+        ::close(dfd);
+    }
+    return Ok();
+#endif
+}
+
 }  // namespace
 
 // ----------------------------------------------------------------------------- 查询
-bool exists(std::string_view path) noexcept {
+bool exists(std::string_view path) {
     std::error_code ec;
     return fs::exists(to_path(path), ec) && !ec;
 }
 
-bool is_directory(std::string_view path) noexcept {
+bool is_directory(std::string_view path) {
     std::error_code ec;
     return fs::is_directory(to_path(path), ec) && !ec;
 }
@@ -95,9 +237,17 @@ Result<std::vector<std::string>> list_dir(std::string_view path) {
         return Status(Errc::IoError,
                       "遍历目录失败: " + std::string(path) + "（" + ec.message() + "）");
     }
-    for (fs::directory_iterator end; it != end; it.increment(ec)) {
-        if (ec) return Status(Errc::IoError, "遍历目录失败: " + std::string(path) + "（" + ec.message() + "）");
+    const fs::directory_iterator end;
+    for (;;) {
+        if (it == end) break;
         names.push_back(from_path(it->path().filename()));
+        it.increment(ec);
+        // 最后一次 increment 出错时 it 会变成 end，循环条件不会再进；
+        // 必须在这里检查，否则"读到一半失败"会被当成完整列表返回。
+        if (ec) {
+            return Status(Errc::IoError,
+                          "遍历目录失败: " + std::string(path) + "（" + ec.message() + "）");
+        }
     }
     std::sort(names.begin(), names.end());
     return names;
@@ -130,25 +280,22 @@ Result<std::string> read_file(std::string_view path) {
 Status write_file(std::string_view path, std::string_view data) {
     if (path.empty()) return Status(Errc::InvalidArgument, "path 为空");
     const std::string target(path);
-    const std::string tmp = target + "." + temp_suffix() + ".tmp";
 
-    if (auto st = write_raw(tmp, data, /*append=*/false); !st) return st;
+    // 同目录临时文件 + 原子替换；临时名带进程 ID，并用 O_EXCL/CREATE_NEW 独占创建，
+    // 两个进程同一毫秒写同一目标也不会互相覆盖半截文件。
+    std::string tmp;
+    Status      st;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        tmp = target + "." + temp_suffix() + ".tmp";
+        st  = write_new_sync(tmp, data);
+        if (st.code() == Errc::AlreadyExists) continue;
+        break;
+    }
+    if (!st) return st;
 
-    std::error_code ec;
-    fs::rename(to_path(tmp), to_path(target), ec);
-    if (ec) {
-        // Windows 的 rename 不覆盖已存在目标：先删再改名。
-        // 这里有一个很小的窗口（删掉之后、改名之前），但比"直接 truncate 原文件"安全得多：
-        // 至少断电时要么旧内容、要么新内容，不会留半截。
-        std::error_code ignored;
-        fs::remove(to_path(target), ignored);
-        ec.clear();
-        fs::rename(to_path(tmp), to_path(target), ec);
-        if (ec) {
-            std::error_code ignored2;
-            fs::remove(to_path(tmp), ignored2);
-            return from_ec(ec, "原子替换", target);
-        }
+    if (auto replaced = replace_sync(tmp, target); !replaced) {
+        remove_quiet(tmp);
+        return replaced;
     }
     return Ok();
 }

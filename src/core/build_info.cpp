@@ -78,18 +78,23 @@ const char* BuildInfo::summary() noexcept {
     // 函数是 noexcept，但字符串拼接可能抛（内存不足）。异常一旦穿出 noexcept
     // 边界就是 std::terminate —— "打印一行摘要把进程打死"显然比"摘要降级"糟。
     // 注意 core 属于 -fno-exceptions 子集，所以 try/catch 必须按异常是否开启裁剪。
-    static const std::string text = []() -> std::string {
+    //
+    // 指针故意不析构：和 log 的 State 一样，summary() 可能在其它静态对象的
+    // 析构函数里被调用；函数内静态 std::string 会先被销毁，返回的 c_str() 就悬垂了。
+    static const char* text = []() -> const char* {
 #if defined(__cpp_exceptions) || defined(_CPPUNWIND) || defined(__EXCEPTIONS)
         try {
-            return build_summary_text();
+            auto* s = new std::string(build_summary_text());
+            return s->c_str();
         } catch (...) {
-            return std::string("my_cpp_libs (summary unavailable)");
+            return "my_cpp_libs (summary unavailable)";
         }
 #else
-        return build_summary_text();
+        auto* s = new std::string(build_summary_text());
+        return s->c_str();
 #endif
     }();
-    return text.c_str();
+    return text;
 }
 
 }  // namespace my

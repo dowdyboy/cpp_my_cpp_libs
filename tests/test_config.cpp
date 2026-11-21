@@ -50,7 +50,7 @@ MYTEST_CASE(config_defaults_only) {
     CHECK_OK(defaults.set("server.host", "0.0.0.0"));
 
     my::json::Layered cfg;
-    cfg.add_defaults(defaults);
+    CHECK_OK(cfg.add_defaults(defaults));
 
     CHECK_EQ(cfg.value<int>("server.port", -1), 8080);
     CHECK_EQ(cfg.value<std::string>("server.host", ""), std::string("0.0.0.0"));
@@ -101,7 +101,7 @@ MYTEST_CASE(config_file_overrides_defaults) {
     CHECK_OK(defaults.set("server.host", "127.0.0.1"));
 
     my::json::Layered cfg;
-    cfg.add_defaults(defaults);
+    CHECK_OK(cfg.add_defaults(defaults));
     CHECK_OK(cfg.add_file(path));
 
     CHECK_EQ(cfg.value<int>("server.port", -1), 9090);            // 文件覆盖
@@ -156,7 +156,7 @@ MYTEST_CASE(config_env_overrides_file) {
     CHECK_OK(defaults.set("worker.count", 2));
 
     my::json::Layered cfg;
-    cfg.add_defaults(defaults);
+    CHECK_OK(cfg.add_defaults(defaults));
     CHECK_OK(cfg.add_env("MYLIBCFG_O"));
     set_env("MYLIBCFG_O__WORKER__COUNT", nullptr);
 
@@ -205,7 +205,7 @@ MYTEST_CASE(config_merged_can_be_dumped) {
     CHECK_OK(overlay.set("a.c", 2));
 
     my::json::Layered cfg;
-    cfg.add_defaults(defaults);
+    CHECK_OK(cfg.add_defaults(defaults));
     CHECK_OK(cfg.add_layer(overlay, my::json::ConfigLayer::Kind::Manual, "test"));
 
     const std::string text = cfg.merged().dump();

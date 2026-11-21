@@ -12,15 +12,36 @@
 namespace my::image {
 namespace {
 
+/// 一次解码/缩放/预处理的缓冲上限。画布与 f32 张量都受它约束：
+/// 这些尺寸来自配置/模型，不能假设调用方给的一定合理。超限返回 OutOfRange，
+/// 而不是让 std::vector 抛 bad_alloc 从 Result 边界穿出去（armv7 上还会乘法回绕）。
+constexpr std::size_t kMaxImageBytes = 512u * 1024u * 1024u;  // 512 MiB
+
+Status check_buffer_size(std::uint64_t bytes, const char* what) {
+    if (bytes > static_cast<std::uint64_t>(kMaxImageBytes)) {
+        return Status(Errc::OutOfRange,
+                      std::string(what) + " 过大: " + std::to_string(bytes) + " 字节（上限 " +
+                          std::to_string(kMaxImageBytes) + "）");
+    }
+    return Ok();
+}
+
+bool pixels_fit(const Image& img) noexcept {
+    return img.pixels.size() >= img.byte_size();
+}
+
 const char* stb_reason() noexcept {
     const char* r = stbi_failure_reason();
     return (r != nullptr && *r != '\0') ? r : "未知原因";
 }
 
+/// 只在**文件名**里找扩展名：`output/v1.0/frame` 的目录名带点，
+/// 按整条路径找最后一个 '.' 会得到扩展名 `0/frame`。
 std::string lower_ext(const std::string& path) {
-    const auto pos = path.find_last_of('.');
-    if (pos == std::string::npos) return {};
-    std::string ext = path.substr(pos + 1);
+    const auto slash = path.find_last_of("/\\");
+    const auto dot   = path.find_last_of('.');
+    if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) return {};
+    std::string ext = path.substr(dot + 1);
     for (char& c : ext) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
@@ -216,6 +237,10 @@ Result<Image> load_memory(const void* data, std::size_t size, int channels) {
 Status save(const std::string& path, const Image& image, int quality) {
     if (path.empty()) return Status(Errc::InvalidArgument, "图像路径为空");
     if (image.empty()) return Status(Errc::InvalidArgument, "要保存的图像为空");
+    if (!pixels_fit(image)) {
+        return Status(Errc::InvalidArgument,
+                      "图像的元数据与像素缓冲区大小不一致（width*height*channels 超过 pixels.size()）");
+    }
     if (quality < 1 || quality > 100) quality = 90;
 
     const std::string ext = lower_ext(path);
@@ -248,11 +273,7 @@ Status save(const std::string& path, const Image& image, int quality) {
 // -----------------------------------------------------------------------------
 namespace {
 
-/// 输出缓冲上限：resize 会按 dst_w * dst_h * channels 一次性分配。
-/// 没有上限时，`resize(src, 1e6, 1e6)` 直接抛 bad_alloc —— 那是从
-/// `Result<T>` 的边界穿出去的异常，等于把"错误可返回"的契约废掉了。
-constexpr std::size_t kMaxImageBytes = 512u * 1024u * 1024u;  // 512 MiB
-
+/// 输出缓冲上限检查。用 uint64 计算，32 位目标上不会因为 int 乘法回绕。
 Status check_output_size(int width, int height, int channels) {
     if (width <= 0 || height <= 0 || channels <= 0) {
         return Status(Errc::InvalidArgument, "目标尺寸非法");
@@ -273,6 +294,7 @@ Status check_output_size(int width, int height, int channels) {
 
 Result<Image> resize(const Image& src, int dst_width, int dst_height) {
     if (src.empty()) return Status(Errc::InvalidArgument, "输入图像为空");
+    if (!pixels_fit(src)) return Status(Errc::InvalidArgument, "输入图像的像素缓冲区小于元数据声明");
     if (auto st = check_output_size(dst_width, dst_height, src.channels); !st) return st;
     if (dst_width == src.width && dst_height == src.height) return src;
     return resize_impl(src, dst_width, dst_height, /*bilinear=*/true);
@@ -280,6 +302,7 @@ Result<Image> resize(const Image& src, int dst_width, int dst_height) {
 
 Result<Image> resize_nearest(const Image& src, int dst_width, int dst_height) {
     if (src.empty()) return Status(Errc::InvalidArgument, "输入图像为空");
+    if (!pixels_fit(src)) return Status(Errc::InvalidArgument, "输入图像的像素缓冲区小于元数据声明");
     if (auto st = check_output_size(dst_width, dst_height, src.channels); !st) return st;
     if (dst_width == src.width && dst_height == src.height) return src;
     return resize_impl(src, dst_width, dst_height, /*bilinear=*/false);
@@ -290,6 +313,7 @@ Result<Image> resize_nearest(const Image& src, int dst_width, int dst_height) {
 // -----------------------------------------------------------------------------
 Result<PreparedImage> prepare(const Image& src, const PreprocessSpec& spec) {
     if (src.empty()) return Status(Errc::InvalidArgument, "输入图像为空");
+    if (!pixels_fit(src)) return Status(Errc::InvalidArgument, "输入图像的像素缓冲区小于元数据声明");
     if (spec.input_width <= 0 || spec.input_height <= 0) {
         return Status(Errc::InvalidArgument, "模型输入尺寸非法");
     }
@@ -301,6 +325,17 @@ Result<PreparedImage> prepare(const Image& src, const PreprocessSpec& spec) {
     if (dst_channels == 0) dst_channels = (src.channels == 4) ? 3 : src.channels;
     if (dst_channels != 1 && dst_channels != 3) {
         return Status(Errc::InvalidArgument, "dst_channels 只支持 0/1/3");
+    }
+
+    // 画布与 f32 张量都在本函数里分配，必须先按 **uint64** 检查上限。
+    // 只检查 resize 的"窄条"是不够的：源图 1000x1、输入 200000x200000 时，
+    // resize 只有 200000x200 会通过，但画布是 120 GB → bad_alloc 穿出 Result。
+    {
+        const std::uint64_t canvas_bytes = static_cast<std::uint64_t>(spec.input_width) *
+                                           static_cast<std::uint64_t>(spec.input_height) *
+                                           static_cast<std::uint64_t>(dst_channels);
+        if (auto st = check_buffer_size(canvas_bytes, "预处理画布"); !st) return st;
+        if (auto st = check_buffer_size(canvas_bytes * sizeof(float), "预处理张量"); !st) return st;
     }
 
     // 1) 通道转换放在缩放之前：1 通道的图少算 2/3 的插值
@@ -380,7 +415,9 @@ Result<PreparedImage> prepare(const Image& src, const PreprocessSpec& spec) {
 }
 
 Result<PreparedImage> prepare_file(const std::string& path, const PreprocessSpec& spec) {
-    auto img = load(path, /*channels=*/0);  // 保持原样，由 prepare 决定怎么转
+    // 显式 3 通道：stb 会把 2 通道（灰度+alpha）转成 3 通道；用 channels=0
+    // 会保留 2 通道，而 prepare() 不支持 2 通道，导致灰+alpha PNG 必然失败。
+    auto img = load(path, /*channels=*/3);
     if (!img) return img.status();
     return prepare(img.value(), spec);
 }

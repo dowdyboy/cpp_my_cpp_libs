@@ -304,6 +304,36 @@ MYTEST_CASE(serial_pty_roundtrip) {
     CHECK(!port.is_open());
 }
 
+// write_some 的超时契约：对端不读时不能无限阻塞；0ms 是"尽力而为"，
+// 有空间可以写出部分，没空间就返回 0（Ok），不是 IoError。
+MYTEST_CASE(serial_pty_write_some_timeout_is_bounded) {
+    PtyPair pty;
+    if (!make_pty(pty)) MYTEST_SKIP("本机无法创建 PTY");
+
+    CHECK_OK_VALUE(port, ms::Port::open(pty.slave_path));
+
+    std::vector<std::uint8_t> big(256 * 1024, 0x5A);  // 远大于 PTY 内核缓冲
+    const auto                t0 = std::chrono::steady_clock::now();
+    auto                      wr = port.write_some(big.data(), big.size(), 50ms);
+    const auto                elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - t0)
+                                 .count();
+
+    CHECK_OK_VALUE(written, wr);
+    CHECK(elapsed < 1000);          // 不能因为对端不读而挂死
+    CHECK(written <= big.size());
+
+    // 再确认 0ms 也不会阻塞（允许写出 0 或一部分）
+    const auto t1 = std::chrono::steady_clock::now();
+    auto       wr0 = port.write_some(big.data(), big.size(), 0ms);
+    const auto elapsed0 = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - t1)
+                              .count();
+    CHECK_OK_VALUE(written0, wr0);
+    CHECK(elapsed0 < 1000);
+    CHECK(written0 <= big.size());
+}
+
 MYTEST_CASE(serial_pty_read_timeout_returns_zero) {
     PtyPair pty;
     if (!make_pty(pty)) MYTEST_SKIP("本机无法创建 PTY");
@@ -471,6 +501,9 @@ MYTEST_CASE(serial_pty_bytes_available_and_flush) {
 }
 MYTEST_CASE(serial_pty_close_then_io_fails) { MYTEST_SKIP("Windows 上需要虚拟串口驱动"); }
 MYTEST_CASE(serial_pty_write_all_times_out_when_peer_never_reads) {
+    MYTEST_SKIP("Windows 上需要虚拟串口驱动");
+}
+MYTEST_CASE(serial_pty_write_some_timeout_is_bounded) {
     MYTEST_SKIP("Windows 上需要虚拟串口驱动");
 }
 MYTEST_CASE(serial_pty_two_ports_are_independent) {

@@ -2,6 +2,11 @@
 
 #include <my_cpp_libs/infer/infer.hpp>
 
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -54,6 +59,41 @@ MYTEST_CASE(infer_stub_roundtrip) {
     CHECK_EQ(output.value().size(), std::size_t{4});
     CHECK_NEAR(output.value()[0], 1.0, 1e-6);
     CHECK_NEAR(output.value()[3], 4.0, 1e-6);
+}
+
+MYTEST_CASE(infer_shape_overflow_is_rejected) {
+    // 乘法逐维检查：不能触发有符号溢出（UBSan 会 trap）
+    my::infer::Shape huge{(std::numeric_limits<std::int64_t>::max)(), 2};
+    CHECK_EQ(huge.elements(), std::int64_t{0});
+
+    my::infer::Tensor t(my::infer::DType::Float32, huge, reinterpret_cast<void*>(1));
+    CHECK_EQ(t.byte_size(), std::size_t{0});
+    CHECK(!t.valid());
+}
+
+MYTEST_CASE(infer_run_single_rejects_bad_input) {
+    my::infer::Options options;
+    auto session = my::infer::create_session(options);
+    CHECK_RESULT(session);
+
+    // 空输入
+    auto empty = session.value()->run_single_f32({}, my::infer::Shape{1, 1, 4});
+    CHECK(!empty);
+    CHECK_EQ(empty.status().code(), my::Errc::InvalidArgument);
+
+    // 形状与数据长度不匹配
+    auto mismatch = session.value()->run_single_f32({1.0f, 2.0f}, my::infer::Shape{1, 3});
+    CHECK(!mismatch);
+    CHECK_EQ(mismatch.status().code(), my::Errc::InvalidArgument);
+
+    // 空 Tensor 送给 stub 后端
+    std::vector<my::infer::Feed> feeds;
+    my::infer::Tensor empty_tensor;
+    feeds.push_back(my::infer::Feed{"input", empty_tensor});
+    std::vector<my::infer::Outcome> outcomes;
+    auto st = session.value()->run(feeds, outcomes);
+    CHECK(!st);
+    CHECK_EQ(st.code(), my::Errc::InvalidArgument);
 }
 
 MYTEST_CASE(infer_stub_rejects_bad_feed) {
@@ -258,7 +298,152 @@ MYTEST_CASE(infer_shape_dynamic_and_overflow) {
     my::infer::Tensor big_i64(my::infer::DType::Int64, big, dummy.data());
     CHECK_EQ(big_i64.byte_size(), (std::size_t{1024} * 1024) * 8);  // 8 MiB
 
-    // 注意：elements() 的 int64 乘积、byte_size() 的 size_t 乘积都没有溢出检查。
-    // 这里刻意不构造会让 int64 有符号溢出的形状（那是 UB，UBSan trap 构建会直接崩），
-    // "溢出没有防护"这一点写在测试报告里，而不是锁进断言。
+    // elements()/byte_size() 现在逐维检查溢出，溢出时返回 0；这里不构造有符号溢出
+    // （那是 UB，UBSan trap 构建会直接崩），对应防护在 infer_shape_overflow_is_rejected。
+}
+
+// -----------------------------------------------------------------------------
+//  真实 ORT 后端的端口形态回归（docs/04 §3 的 7 个模型）
+//
+//  这些模型以前只用 tools/model_inspect 手工验证过，测试里没有；ORT 改名/升级
+//  （1.23 的 API 变化）时不会有任何用例变红。这里用 Session 的 Port 信息自动
+//  构造输入，逐个覆盖 f32/i64/f16/u8、动态 batch、2 进 2 出、CNN 和 softmax。
+//  没有 ORT 后端（MinGW/Linux 未接入）时整个用例 SKIP。
+// -----------------------------------------------------------------------------
+namespace {
+
+const char* models_root() {
+#ifdef MYLIB_TEST_MODELS_DIR
+    return MYLIB_TEST_MODELS_DIR;
+#else
+    return "models";
+#endif
+}
+
+struct ModelCase {
+    const char* file;
+    bool        dynamic_batch;  ///< 是否需要把 -1 维替换成 1
+};
+
+bool run_ort_model(const ModelCase& mc) {
+    using namespace my::infer;
+
+    Options opt;
+    opt.backend    = "onnxruntime";
+    opt.model_path = std::string(models_root()) + "/" + mc.file;
+
+    auto made = create_session(opt);
+    if (!made) {
+        std::printf("         模型 %s 创建 Session 失败: %s\n", mc.file,
+                    made.status().to_string().c_str());
+        return false;
+    }
+    Session& s = *made.value();
+
+    const auto& in_ports  = s.inputs();
+    const auto& out_ports = s.outputs();
+    if (in_ports.empty() || out_ports.empty()) return false;
+
+    std::vector<std::vector<std::uint8_t>> buffers;
+    std::vector<Feed>                      feeds;
+    buffers.reserve(in_ports.size());
+    feeds.reserve(in_ports.size());
+
+    for (const auto& port : in_ports) {
+        Shape shape = port.shape;
+        if (mc.dynamic_batch) {
+            for (auto& d : shape.dims) {
+                if (d <= 0) d = 1;
+            }
+        }
+        const std::int64_t elems = shape.elements();
+        if (elems <= 0) return false;
+        const std::size_t bytes = static_cast<std::size_t>(elems) * dtype_size(port.type);
+        if (bytes == 0) return false;
+
+        buffers.emplace_back(bytes, 0);  // 全 0 输入只验证端口/类型/执行，不验证数值语义
+        feeds.push_back(Feed{port.name, Tensor(port.type, shape, buffers.back().data(), bytes)});
+    }
+
+    std::vector<Outcome> outs;
+    auto                 st = s.run(feeds, outs);
+    if (!st) {
+        std::printf("         模型 %s run 失败: %s\n", mc.file, st.to_string().c_str());
+        return false;
+    }
+    if (outs.size() != out_ports.size()) return false;
+
+    for (std::size_t i = 0; i < outs.size(); ++i) {
+        const Outcome& o = outs[i];
+        if (!o.tensor.valid()) return false;
+        if (o.tensor.type != out_ports[i].type) return false;
+        // 非 f16/int 的常见输出都转 float 检查有限性；转换失败直接判错
+        const auto conv = tensor_to_float32(o.tensor);
+        if (!conv) return false;
+        for (float v : conv.value()) {
+            if (!std::isfinite(v)) return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+MYTEST_CASE(infer_ort_model_port_forms) {
+    if (!my::infer::has_backend("onnxruntime")) {
+        MYTEST_SKIP("未编译 ONNX Runtime 后端");
+    }
+
+    const ModelCase cases[] = {
+        {"dyn_batch.onnx", true},   {"multi_io.onnx", false},
+        {"int64_input.onnx", false}, {"fp16_io.onnx", false},
+        {"u8_input.onnx", false},   {"small_cnn.onnx", false},
+        {"softmax_1d.onnx", false},
+    };
+    for (const auto& mc : cases) {
+        CHECK(run_ort_model(mc));
+    }
+
+    // softmax_1d 的全 0 输入应输出均匀 0.25；单独再跑一次验证数值路径
+    my::infer::Options opt;
+    opt.backend    = "onnxruntime";
+    opt.model_path = std::string(models_root()) + "/softmax_1d.onnx";
+    auto made      = my::infer::create_session(opt);
+    CHECK_RESULT(made);
+    std::vector<float> input{0.0f, 0.0f, 0.0f, 0.0f};
+    auto out = made.value()->run_single_f32(input, my::infer::Shape{4});
+    CHECK_RESULT(out);
+    CHECK_EQ(out.value().size(), std::size_t{4});
+    for (float v : out.value()) CHECK_NEAR(v, 0.25, 1e-6);
+}
+
+MYTEST_CASE(infer_ncnn_model_port_forms) {
+    if (!my::infer::has_backend("ncnn")) {
+        MYTEST_SKIP("未编译 ncnn 后端");
+    }
+
+    // ncnn 的 .param 才是入口；create_session 用它推导 .bin
+    my::infer::Options opt;
+    opt.backend    = "ncnn";
+    opt.model_path = std::string(models_root()) + "/ncnn/small_cnn.param";
+    auto made      = my::infer::create_session(opt);
+    CHECK_RESULT(made);
+
+    const auto& in = made.value()->inputs();
+    CHECK(!in.empty());
+    if (in.empty()) return;
+
+    // ncnn 的 Port.shape 是空的（网络输入 blob 不带静态形状），按模型约定给 1x3x32x32
+    const my::infer::Shape shape{1, 3, 32, 32};
+    const std::int64_t     elems = shape.elements();
+    CHECK(elems > 0);
+    std::vector<float> input(static_cast<std::size_t>(elems), 0.0f);
+    std::vector<my::infer::Feed> feeds;
+    feeds.push_back(my::infer::Feed{in[0].name,
+                                    my::infer::Tensor(my::infer::DType::Float32, shape,
+                                                      input.data(), input.size() * sizeof(float))});
+    std::vector<my::infer::Outcome> outs;
+    CHECK_OK(made.value()->run(feeds, outs));
+    CHECK(!outs.empty());
+    for (const auto& o : outs) CHECK(o.tensor.valid());
 }

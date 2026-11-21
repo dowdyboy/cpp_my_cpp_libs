@@ -21,6 +21,7 @@
 //  Document::save_file 是直接 truncate 写的（历史行为，未改）。
 // =============================================================================
 
+#include <exception>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -57,9 +58,9 @@ class Layered {
 public:
     Layered() = default;
 
-    Layered& add_defaults(Document defaults) {
-        (void)add_layer(std::move(defaults), ConfigLayer::Kind::Defaults, "defaults");
-        return *this;
+    /// 默认值层。与其他 add_* 一样返回 Status：合并失败不能被静默吞掉。
+    Status add_defaults(Document defaults) {
+        return add_layer(std::move(defaults), ConfigLayer::Kind::Defaults, "defaults");
     }
 
     /// 读文件并合并；解析/读取失败返回错误（调用方决定要不要继续）
@@ -88,14 +89,24 @@ public:
     }
 
     Status add_layer(Document doc, ConfigLayer::Kind kind, std::string name) {
-        if (auto st = merge_into(merged_, doc); !st) return st;
-        layers_.push_back(ConfigLayer{kind, std::move(name)});
-        return Ok();
+        // 先合并到副本，成功后再提交：merge 抛异常时 merged_ 不能处于半合并状态。
+        try {
+            Document next = merged_;
+            if (auto st = merge_into(next, doc); !st) return st;
+            merged_ = std::move(next);
+            layers_.push_back(ConfigLayer{kind, std::move(name)});
+            return Ok();
+        } catch (const std::exception& e) {
+            return Status(Errc::RuntimeError, std::string("配置层合并失败: ") + e.what());
+        } catch (...) {
+            return Status(Errc::RuntimeError, "配置层合并失败: 未知错误");
+        }
     }
 
     const Document&                 merged() const noexcept { return merged_; }
     const std::vector<ConfigLayer>& layers() const noexcept { return layers_; }
 
+    /// 便捷读取：缺失/类型不匹配都返回 fallback；需要区分请用 merged().get<T>()
     template <class T>
     T value(std::string_view path, T fallback) const {
         return merged_.get_or<T>(path, std::move(fallback));

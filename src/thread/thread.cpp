@@ -27,8 +27,13 @@ Result<std::unique_ptr<ThreadPool>> ThreadPool::create(std::size_t threads) {
             pool->workers_.emplace_back([p = pool.get()] { p->worker_loop(); });
         }
     } catch (const std::exception& e) {
-        // 起线程失败：把已经起来的收掉，别留 joinable thread
-        pool->stopping_.store(true);
+        // 起线程失败：把已经起来的收掉，别留 joinable thread。
+        // stopping_ 必须与 worker 的 wait 使用同一把锁置位，否则会丢唤醒：
+        // worker 判完谓词、还没进入 wait 时通知被丢掉，join 会永久阻塞。
+        {
+            std::lock_guard<std::mutex> lock(pool->mutex_);
+            pool->stopping_.store(true);
+        }
         pool->work_cv_.notify_all();
         for (auto& t : pool->workers_) {
             if (t.joinable()) t.join();
@@ -76,8 +81,7 @@ void ThreadPool::shutdown(bool drain) {
     std::size_t dropped = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (stopping_.exchange(true)) return;  // 幂等
-        if (!drain) {
+        if (!stopping_.exchange(true) && !drain) {
             dropped = tasks_.size();
             std::queue<std::function<void()>> empty;
             std::swap(tasks_, empty);
@@ -91,12 +95,18 @@ void ThreadPool::shutdown(bool drain) {
 
     work_cv_.notify_all();
 
-    for (auto& t : workers_) {
-        if (t.joinable()) t.join();
+    // 并发/重复调用 shutdown 时，后来者要等第一个调用者 join 完。
+    // 只锁 join 阶段，不能占着 mutex_ 去 join（worker 退出需要 mutex_）。
+    {
+        std::lock_guard<std::mutex> join_lock(join_mutex_);
+        for (auto& t : workers_) {
+            if (t.joinable()) t.join();
+        }
+        workers_.clear();
+        worker_count_.store(0);
+        std::lock_guard<std::mutex> lock(mutex_);
+        idle_cv_.notify_all();
     }
-    workers_.clear();
-    std::lock_guard<std::mutex> lock(mutex_);
-    idle_cv_.notify_all();
 }
 
 bool ThreadPool::wait_idle(std::chrono::milliseconds timeout) {

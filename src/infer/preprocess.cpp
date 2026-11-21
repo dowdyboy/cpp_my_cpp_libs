@@ -2,10 +2,28 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
+#include <string>
 
 namespace my::infer {
 namespace {
+
+/// 预处理输出缓冲上限（f32）。这几个函数是公开 API，尺寸来自调用方/配置，
+/// 超限必须返回 OutOfRange，而不是让 vector 抛 bad_alloc 穿出 Result。
+constexpr std::uint64_t kMaxTensorBytes = 512ull * 1024ull * 1024ull;
+
+Status check_tensor_size(std::uint64_t pixels, int channels) {
+    if (pixels == 0 || channels <= 0) return Status(Errc::InvalidArgument, "尺寸参数非法");
+    const std::uint64_t max_elements = kMaxTensorBytes / sizeof(float);
+    if (pixels > max_elements / static_cast<std::uint64_t>(channels)) {
+        return Status(Errc::OutOfRange,
+                      "张量过大: " + std::to_string(pixels) + " 像素 x " +
+                          std::to_string(channels) + " 通道（上限 " +
+                          std::to_string(max_elements) + " 个 float）");
+    }
+    return Ok();
+}
 
 /// 目标通道 i 应该从源图的哪个通道取
 /// dst_order 为 RGB 时，i=0 要 R；src_order 为 BGR 时 R 在索引 2
@@ -33,9 +51,13 @@ Status image_to_tensor(const std::uint8_t* src, int height, int width, int chann
 
     // 4 通道输入丢弃 alpha：NormalizeSpec 的 mean/stddev 本身只有 3 组，
     // 输出也按 3 通道给，避免出现"分配了 4 个平面、第 4 个恒为 0"的半成品。
-    const int         out_channels = (channels == 1) ? 1 : 3;
-    const std::size_t pixel_count  = static_cast<std::size_t>(height) * static_cast<std::size_t>(width);
-    const std::size_t plane        = pixel_count;
+    const int out_channels = (channels == 1) ? 1 : 3;
+    const std::uint64_t pixels_u64 = static_cast<std::uint64_t>(height) *
+                                     static_cast<std::uint64_t>(width);
+    if (auto st = check_tensor_size(pixels_u64, out_channels); !st) return st;
+
+    const std::size_t pixel_count = static_cast<std::size_t>(pixels_u64);
+    const std::size_t plane       = pixel_count;
 
     out.assign(pixel_count * static_cast<std::size_t>(out_channels), 0.0f);
 
@@ -72,7 +94,10 @@ Status hwc_to_chw(const float* src, int height, int width, int channels, std::ve
     if (height <= 0 || width <= 0 || channels <= 0) {
         return Status(Errc::InvalidArgument, "尺寸参数非法");
     }
-    const std::size_t plane = static_cast<std::size_t>(height) * static_cast<std::size_t>(width);
+    const std::uint64_t pixels_u64 = static_cast<std::uint64_t>(height) *
+                                     static_cast<std::uint64_t>(width);
+    if (auto st = check_tensor_size(pixels_u64, channels); !st) return st;
+    const std::size_t plane = static_cast<std::size_t>(pixels_u64);
     out.assign(plane * static_cast<std::size_t>(channels), 0.0f);
 
     for (std::size_t p = 0; p < plane; ++p) {
@@ -97,6 +122,7 @@ Status normalize(const float* src, std::size_t pixels, int channels, const Norma
     }
 
     const bool        nchw = (spec.layout == Layout::NCHW);
+    if (auto st = check_tensor_size(pixels, channels); !st) return st;
     const std::size_t n    = pixels * static_cast<std::size_t>(channels);
     out.resize(n);
 
@@ -151,15 +177,15 @@ Status softmax(float* data, std::size_t n) {
     float mx = data[0];
     for (std::size_t i = 1; i < n; ++i) mx = std::max(mx, data[i]);
 
+    // 先在只读遍历里算归一化因子；失败时不要改写调用方缓冲。
     double sum = 0.0;
-    for (std::size_t i = 0; i < n; ++i) {
-        data[i] = std::exp(data[i] - mx);
-        sum += data[i];
-    }
+    for (std::size_t i = 0; i < n; ++i) sum += std::exp(data[i] - mx);
     if (sum <= 0.0 || !std::isfinite(sum)) {
         return Status(Errc::RuntimeError, "softmax 归一化因子非法");
     }
-    for (std::size_t i = 0; i < n; ++i) data[i] = static_cast<float>(data[i] / sum);
+    for (std::size_t i = 0; i < n; ++i) {
+        data[i] = static_cast<float>(std::exp(data[i] - mx) / sum);
+    }
     return Ok();
 }
 
@@ -167,6 +193,24 @@ std::size_t argmax(const float* data, std::size_t n) noexcept {
     if (data == nullptr || n == 0) return 0;
     return static_cast<std::size_t>(std::max_element(data, data + n) - data);
 }
+
+namespace {
+
+/// NaN/Inf 分数排在最后；比较器仍满足严格弱序（所有非有限值彼此等价）。
+bool score_better(float a, float b) noexcept {
+    const bool fa = std::isfinite(a);
+    const bool fb = std::isfinite(b);
+    if (!fa) return false;
+    if (!fb) return true;
+    return a > b;
+}
+
+bool box_finite(const Box& b) noexcept {
+    return std::isfinite(b.x1) && std::isfinite(b.y1) && std::isfinite(b.x2) &&
+           std::isfinite(b.y2) && std::isfinite(b.score);
+}
+
+}  // namespace
 
 std::vector<Prediction> topk(const float* data, std::size_t n, std::size_t k) {
     std::vector<Prediction> out;
@@ -177,7 +221,9 @@ std::vector<Prediction> topk(const float* data, std::size_t n, std::size_t k) {
     for (std::size_t i = 0; i < n; ++i) out.push_back(Prediction{i, data[i]});
 
     std::partial_sort(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(k), out.end(),
-                      [](const Prediction& a, const Prediction& b) { return a.score > b.score; });
+                      [](const Prediction& a, const Prediction& b) {
+                          return score_better(a.score, b.score);
+                      });
     out.resize(k);
     return out;
 }
@@ -215,7 +261,15 @@ std::vector<Box> nms(std::vector<Box> boxes, float iou_threshold) {
     std::vector<Box> keep;
     if (boxes.empty()) return keep;
 
-    std::sort(boxes.begin(), boxes.end(), [](const Box& a, const Box& b) { return a.score > b.score; });
+    // NaN/Inf 坐标或分数会让 sort 的比较器失去严格弱序（UB），也会让 IoU 变 NaN。
+    // 检测模型坏量化/除零时可能输出这种框：直接丢弃，不能让它污染 NMS。
+    boxes.erase(std::remove_if(boxes.begin(), boxes.end(),
+                               [](const Box& b) { return !box_finite(b); }),
+                boxes.end());
+    if (boxes.empty()) return keep;
+
+    std::sort(boxes.begin(), boxes.end(),
+              [](const Box& a, const Box& b) { return score_better(a.score, b.score); });
 
     std::vector<char> suppressed(boxes.size(), 0);
     for (std::size_t i = 0; i < boxes.size(); ++i) {

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -48,6 +49,8 @@ std::int64_t Shape::elements() const noexcept {
     std::int64_t n = 1;
     for (std::int64_t d : dims) {
         if (d <= 0) return 0;  // 动态维
+        // 逐维检查，避免 n *= d 有符号溢出（UB，UBSan 会 trap）
+        if (n > (std::numeric_limits<std::int64_t>::max)() / d) return 0;
         n *= d;
     }
     return n;
@@ -67,7 +70,11 @@ std::size_t Tensor::byte_size() const noexcept {
     if (bytes != 0) return bytes;
     const std::int64_t n = shape.elements();
     if (n <= 0) return 0;
-    return static_cast<std::size_t>(n) * dtype_size(type);
+    const std::size_t elem = dtype_size(type);
+    if (elem == 0) return 0;
+    const auto un = static_cast<std::uint64_t>(n);
+    if (un > (std::numeric_limits<std::size_t>::max)() / elem) return 0;
+    return static_cast<std::size_t>(un) * elem;
 }
 
 // =============================================================================

@@ -10,10 +10,13 @@
 // =============================================================================
 
 #include "my_cpp_libs/core/hash.hpp"
+#include "my_cpp_libs/core/path_utf8.hpp"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -182,6 +185,28 @@ MYTEST_CASE(hash_sha256_file_missing_returns_error) {
     CHECK_EQ(r.status().code(), my::Errc::IoError);
     // 消息里要带路径，便于排查
     CHECK(r.status().message().find("definitely-not-here-xyz") != std::string::npos);
+}
+
+MYTEST_CASE(hash_sha256_file_handles_utf8_path) {
+    namespace fs = std::filesystem;
+    const std::string dir  = "mylib_hash_utf8_测试目录";
+    const std::string path = dir + "/文件.bin";
+    std::error_code   ec;
+    fs::remove_all(my::core::to_path(dir), ec);
+    fs::create_directories(my::core::to_path(dir), ec);
+
+    const std::string data = "UTF-8 路径下的文件内容";
+    {
+        std::ofstream out(my::core::to_path(path), std::ios::binary);
+        out.write(data.data(), static_cast<std::streamsize>(data.size()));
+    }
+
+    auto from_file = my::hash::sha256_file_hex(path);
+    CHECK_RESULT(from_file);
+    const auto from_mem = my::hash::sha256_hex(data);
+    CHECK_EQ(from_file.value(), from_mem);
+
+    fs::remove_all(my::core::to_path(dir), ec);
 }
 
 MYTEST_CASE(hash_digest_equal_semantics) {

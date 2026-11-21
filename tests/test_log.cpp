@@ -1,5 +1,6 @@
 #include "test_framework.hpp"
 
+#include <my_cpp_libs/core/path_utf8.hpp>
 #include <my_cpp_libs/log/log.hpp>
 
 #include <spdlog/sinks/null_sink.h>
@@ -417,4 +418,99 @@ MYTEST_CASE(log_shutdown_idempotent) {
     CHECK_EQ(count_lines(content), std::size_t{2});
 
     std::filesystem::remove(path, ec);
+}
+
+// async_queue_size == 0 会让 spdlog 的队列恒满，第一条日志永久阻塞。
+// init 必须在配置阶段就拒绝，而不是等运行时挂死。
+MYTEST_CASE(log_rejects_zero_async_queue) {
+    my::log::Config cfg;
+    cfg.to_console      = true;
+    cfg.async           = true;
+    cfg.async_queue_size = 0;
+
+    auto st = my::log::init(cfg);
+    CHECK(!st);
+    CHECK_EQ(st.code(), my::Errc::InvalidArgument);
+
+    // 同一个错误配置不能把已经工作的 logger 拆掉
+    my::log::Config good;
+    good.to_console = false;
+    good.file_path  = "output/test_log_keep_after_bad_init.log";
+    good.rotate_bytes = 0;
+    CHECK_OK(my::log::init(good));
+    CHECK(my::log::is_initialized());
+
+    auto bad = my::log::init(cfg);
+    CHECK(!bad);
+    CHECK(my::log::is_initialized());  // 旧配置仍然可用
+    my::log::shutdown();
+}
+
+// 滚动文件分支在 0.1.9 之前零覆盖；自定义 UTF-8 sink 必须保持同样的滚动语义。
+MYTEST_CASE(log_rotating_file) {
+    std::error_code ec;
+    std::filesystem::create_directories("output", ec);
+
+    const std::string path = "output/test_log_rotate.log";
+    std::filesystem::remove(path, ec);
+    std::filesystem::remove(path + ".1", ec);
+    std::filesystem::remove(path + ".2", ec);
+
+    my::log::Config cfg;
+    cfg.to_console   = false;
+    cfg.file_path    = path;
+    cfg.rotate_bytes = 256;
+    cfg.rotate_files = 2;
+    cfg.level        = my::log::Level::Info;
+    cfg.pattern      = "%v";
+
+    CHECK_OK(my::log::init(cfg));
+    for (int i = 0; i < 40; ++i) {
+        my::log::write(my::log::Level::Info, "rotation-line-" + std::to_string(i));
+    }
+    my::log::flush();
+    my::log::shutdown();
+
+    CHECK(std::filesystem::exists(path));
+    CHECK(std::filesystem::exists(path + ".1"));
+    CHECK(std::filesystem::exists(path + ".2"));
+    // 文件总数不能超过 rotate_files + 1（base + .1 + .2）
+    CHECK(!std::filesystem::exists(path + ".3"));
+
+    std::filesystem::remove(path, ec);
+    std::filesystem::remove(path + ".1", ec);
+    std::filesystem::remove(path + ".2", ec);
+}
+
+// Windows 上 spdlog 自带的 file sink 按 ANSI 打开路径，中文目录会写到乱码位置。
+// 自定义 sink 必须真正在期望路径落下文件。
+MYTEST_CASE(log_utf8_path_roundtrip) {
+    std::error_code ec;
+    const std::string dir = "output/中文日志";
+    std::filesystem::create_directories(my::core::to_path(dir), ec);
+    CHECK(!ec);
+
+    const std::string path = dir + "/app.log";
+    std::filesystem::remove(my::core::to_path(path), ec);
+
+    my::log::Config cfg;
+    cfg.to_console   = false;
+    cfg.file_path    = path;
+    cfg.rotate_bytes = 0;
+    cfg.pattern      = "%v";
+    CHECK_OK(my::log::init(cfg));
+    my::log::write(my::log::Level::Info, "utf8-path-line");
+    my::log::flush();
+    my::log::shutdown();
+
+    CHECK(std::filesystem::exists(my::core::to_path(path)));
+    {
+        std::ifstream in(my::core::to_path(path), std::ios::binary);
+        CHECK(static_cast<bool>(in));
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(text.find("utf8-path-line") != std::string::npos);
+    }
+
+    std::filesystem::remove(my::core::to_path(path), ec);
+    std::filesystem::remove(my::core::to_path(dir), ec);
 }

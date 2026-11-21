@@ -723,10 +723,20 @@ MYTEST_CASE(dsp_modulation_name_covers_all) {
     CHECK(std::string(my::dsp::modulation_name(Modulation::PSK)) == "PSK");
 }
 
+// 极低截止频率：float 系数的极点贴到单位圆，必须明确拒绝而不是输出发散/NaN。
+MYTEST_CASE(dsp_biquad_rejects_unstable_low_frequency) {
+    auto bad = my::dsp::biquad_design(my::dsp::BiquadType::Lowpass, 0.5, 48000.0, 0.707);
+    CHECK(!bad);
+    CHECK_EQ(bad.status().code(), my::Errc::OutOfRange);
+
+    // 正常音频频段仍要能用
+    auto ok = my::dsp::biquad_design(my::dsp::BiquadType::Lowpass, 20.0, 4000.0, 0.707);
+    CHECK_RESULT(ok);
+}
+
 MYTEST_CASE(dsp_biquad_notch) {
     const double fs = 1000.0;
-    Samples      x(4096);
-    for (std::size_t i = 0; i < x.size(); ++i) {
+    Samples      x(4096);    for (std::size_t i = 0; i < x.size(); ++i) {
         const double t = static_cast<double>(i) / fs;
         x[i] = static_cast<float>(std::sin(2.0 * kPi * 50.0 * t) +
                                   std::sin(2.0 * kPi * 200.0 * t));
@@ -838,6 +848,30 @@ MYTEST_CASE(dsp_detect_two_bursts) {
     }
 }
 
+// min_len 必须按**边界细化后的真实样本数**过滤：短毛刺不能被窗口拖尾"放大"成合格突发。
+MYTEST_CASE(dsp_detect_min_len_after_refine) {
+    const double      fs = 1000.0;
+    const std::size_t n  = 3000;
+    Samples           x(n, 0.0f);
+
+    const std::size_t short_at = 500, short_len = 8;
+    const std::size_t long_at = 1500, long_len = 300;
+    for (std::size_t i = 0; i < short_len; ++i) {
+        x[short_at + i] = static_cast<float>(std::sin(2.0 * kPi * 100.0 * static_cast<double>(i) / fs));
+    }
+    for (std::size_t i = 0; i < long_len; ++i) {
+        x[long_at + i] = static_cast<float>(std::sin(2.0 * kPi * 100.0 * static_cast<double>(i) / fs));
+    }
+
+    const auto bursts = my::dsp::detect_bursts(x, 32, 10.0f, /*min_len=*/64);
+    CHECK_EQ(bursts.size(), std::size_t{1});
+    if (!bursts.empty()) {
+        CHECK(bursts[0].begin <= long_at + 64);
+        CHECK(bursts[0].end >= long_at + long_len - 64);
+        CHECK(bursts[0].end - bursts[0].begin >= std::size_t{64});
+    }
+}
+
 // -----------------------------------------------------------------------------
 //  特征 / 识别
 // -----------------------------------------------------------------------------
@@ -906,6 +940,25 @@ MYTEST_CASE(dsp_analyze_fm) {
     CHECK(f.inst_freq_std > 0.02);
     CHECK(f.inst_freq_quiet < 0.60);
 
+    const auto c = my::dsp::classify(f);
+    CHECK_EQ(static_cast<int>(c.modulation), static_cast<int>(my::dsp::Modulation::FM));
+}
+
+// 同一 FM 信号换采样率不应改变判决：瞬时频率门限必须按 Hz 换算，
+// 直接拿 rad/sample 比的旧实现会在 fs=48k 时把干净 FM 判成 CW。
+MYTEST_CASE(dsp_analyze_fm_48k_units) {
+    const double fs = 48000.0;
+    const double fc = 1000.0, fm = 100.0, beta = 2.0;
+    Samples      x(32768);
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        const double t = static_cast<double>(i) / fs;
+        x[i] = static_cast<float>(
+            std::sin(2.0 * kPi * fc * t + beta * std::sin(2.0 * kPi * fm * t)));
+    }
+    add_awgn(x, 40.0, 15);
+
+    CHECK_OK_VALUE(f, my::dsp::analyze(x, fs));
+    CHECK_EQ(f.sample_rate_hz, fs);
     const auto c = my::dsp::classify(f);
     CHECK_EQ(static_cast<int>(c.modulation), static_cast<int>(my::dsp::Modulation::FM));
 }
@@ -1065,6 +1118,46 @@ MYTEST_CASE(dsp_demod_fm_recovers_modulation) {
             std::cos(2.0 * kPi * fm * static_cast<double>(i + skip) / fs));  // 鉴频给出的是导数
     }
     CHECK(correlation(a, t) > 0.90);
+}
+
+// 低通设计失败不能静默返回未滤波信号：截止 >= fs/2 必须报 InvalidArgument。
+MYTEST_CASE(dsp_demod_rejects_invalid_audio_cutoff) {
+    const double fs = 4000.0;
+    Samples      x(1024);
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        x[i] = static_cast<float>(std::sin(2.0 * kPi * 800.0 * static_cast<double>(i) / fs));
+    }
+
+    auto am = my::dsp::demod_am(x, fs, fs);  // == Nyquist，低通无意义
+    CHECK(!am);
+    CHECK_EQ(am.status().code(), my::Errc::InvalidArgument);
+
+    auto fm = my::dsp::demod_fm(x, fs, -1.0);  // 负截止
+    CHECK(!fm);
+    CHECK_EQ(fm.status().code(), my::Errc::InvalidArgument);
+}
+
+MYTEST_CASE(dsp_analyze_bpsk_end_to_end) {
+    const double fs = 8000.0;
+    const double rs = 100.0;   // 每符号 80 个采样，相位跳变只占很小一部分
+    const double fc = 1000.0;
+    const auto   bits = random_bits(80, 29);
+    const auto   sps  = static_cast<std::size_t>(fs / rs);
+
+    Samples x(bits.size() * sps);
+    for (std::size_t k = 0; k < bits.size(); ++k) {
+        const float sym = bits[k] ? 1.0f : -1.0f;
+        for (std::size_t i = 0; i < sps; ++i) {
+            const double n = static_cast<double>(k * sps + i);
+            x[k * sps + i] = sym * static_cast<float>(std::sin(2.0 * kPi * fc * n / fs));
+        }
+    }
+    add_awgn(x, 40.0, 30);
+
+    CHECK_OK_VALUE(f, my::dsp::analyze(x, fs));
+    CHECK(f.envelope_cv < 0.15);          // 恒定包络，排除 AM/ASK
+    const auto c = my::dsp::classify(f);
+    CHECK_EQ(static_cast<int>(c.modulation), static_cast<int>(my::dsp::Modulation::PSK));
 }
 
 MYTEST_CASE(dsp_demod_ask_bits) {

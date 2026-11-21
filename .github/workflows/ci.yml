@@ -262,15 +262,29 @@ jobs:
           restore-keys: deps-windows-
       # -WithOrtWin：把 ONNX Runtime 也拉下来。没有它 infer 会退化成 stub，
       # ml 的 9 条用例就会全部 MYTEST_SKIP —— 那等于"有 CI 但没测"。
-      # 拉下来之后 --fail-on-skip 也会生效（有后端时 ml 不许静默跳过）。
+      # -RequireOrtWin：这个 job 的存在意义就是跑 ml；拿不到 ORT 必须失败，
+      # 不能让"ml 静默跳过"继续冒充全绿。可用仓库变量 MYLIB_ORT_WIN_URL 覆盖下载地址。
       - name: 补齐依赖压缩包（含 Windows 的 ONNX Runtime）
         shell: pwsh
-        run: ./scripts/fetch-deps.ps1 -WithOrtWin
+        env:
+          MYLIB_ORT_WIN_URL: ${{ vars.MYLIB_ORT_WIN_URL }}
+        run: |
+          $url = $env:MYLIB_ORT_WIN_URL
+          if ($url) { ./scripts/fetch-deps.ps1 -WithOrtWin -RequireOrtWin -OrtWinUrl $url }
+          else { ./scripts/fetch-deps.ps1 -WithOrtWin -RequireOrtWin }
       - name: Configure
-        run: >
-          cmake -S . -B build/ci -A x64
-          -DMYLIB_ENABLE_CV=OFF
-          -DMYLIB_ENABLE_NCNN=OFF
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build | Out-Null
+          cmake -S . -B build/ci -A x64 -DMYLIB_ENABLE_CV=OFF -DMYLIB_ENABLE_NCNN=OFF 2>&1 | Tee-Object -FilePath build/ci-configure.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: 确认 ORT 后端真的启用（否则 ml 的 --fail-on-skip 不会生效）
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path build/ci-configure.log -Pattern 'Infer backend\s*:\s*onnxruntime')) {
+            Write-Error "配置结果里没有 'Infer backend : onnxruntime'，ml 将静默 skip；拒绝把这种构建当成 ml 已验证"
+            exit 1
+          }
       - name: Build
         run: cmake --build build/ci --config Release
       - name: Test
@@ -645,9 +659,14 @@ jobs:
             third_party
           key: deps-windows-${{ hashFiles('scripts/fetch-deps.ps1') }}
           restore-keys: deps-windows-
-      - name: 补齐依赖压缩包
+      - name: 补齐依赖压缩包（含 Windows 的 ONNX Runtime）
         shell: pwsh
-        run: ./scripts/fetch-deps.ps1
+        env:
+          MYLIB_ORT_WIN_URL: ${{ vars.MYLIB_ORT_WIN_URL }}
+        run: |
+          $url = $env:MYLIB_ORT_WIN_URL
+          if ($url) { ./scripts/fetch-deps.ps1 -WithOrtWin -RequireOrtWin -OrtWinUrl $url }
+          else { ./scripts/fetch-deps.ps1 -WithOrtWin -RequireOrtWin }
       - name: Configure（打包配置：有 ORT、无 OpenCV）
         run: >
           cmake -S . -B build/pkg-msvc -A x64
@@ -669,15 +688,29 @@ jobs:
           $prefix = (Get-ChildItem build\pkgtest -Directory | Select-Object -First 1).FullName
           if (-not (Test-Path "$prefix\lib\cmake\my_cpp_libs\my_cpp_libsConfig.cmake")) { throw "包内没有 Config" }
           if (-not (Test-Path "$prefix\share\licenses\my_cpp_libs\THIRD_PARTY_NOTICES.md")) { throw "包内没有许可证" }
+          # 包名带 -ort 就必须真的有 ORT：fetch 已 -RequireOrtWin，这里再校验一次
+          if (-not (Test-Path "$prefix\bin\onnxruntime.dll")) { throw "包名是 -ort，但包内没有 onnxruntime.dll" }
+          if (-not (Test-Path "$prefix\share\licenses\my_cpp_libs\onnxruntime-LICENSE")) { throw "包内缺少 ORT 许可证" }
+          if (-not (Test-Path "$prefix\share\licenses\my_cpp_libs\onnxruntime-ThirdPartyNotices.txt")) { throw "包内缺少 ORT ThirdPartyNotices" }
           cmake -S tests/sdk_consumer -B build\consumer -A x64 "-DCMAKE_PREFIX_PATH=$prefix"
           cmake --build build\consumer --config Release
           $env:PATH = "$prefix\bin;$env:PATH"
+          # 复制到包的 bin/ 再运行：Windows 的 System32 在 PATH 之前，否则可能加载
+          # 机器上碰巧存在的旧 onnxruntime.dll，而不是刚打出来的这个包。
           $exe = Get-ChildItem build\consumer -Recurse -Filter sdk_consumer.exe | Select-Object -First 1
-          & $exe.FullName
-          if ($LASTEXITCODE -ne 0) { throw "消费方运行失败" }
+          $runExe = Join-Path $prefix ('bin\__verify_' + $exe.Name)
+          Copy-Item $exe.FullName $runExe -Force
+          & $runExe
+          $runCode = $LASTEXITCODE
+          Remove-Item $runExe -Force -ErrorAction SilentlyContinue
+          if ($runCode -ne 0) { throw "消费方运行失败" }
           $min = Get-ChildItem build\consumer -Recurse -Filter sdk_consumer_min.exe | Select-Object -First 1
-          & $min.FullName
-          if ($LASTEXITCODE -ne 0) { throw "单组件消费方运行失败（SDK 的组件链接表可能缺依赖）" }
+          $runMin = Join-Path $prefix ('bin\__verify_' + $min.Name)
+          Copy-Item $min.FullName $runMin -Force
+          & $runMin
+          $minCode = $LASTEXITCODE
+          Remove-Item $runMin -Force -ErrorAction SilentlyContinue
+          if ($minCode -ne 0) { throw "单组件消费方运行失败（SDK 的组件链接表可能缺依赖）" }
       - uses: actions/upload-artifact@v4
         with:
           name: sdk-win-x64-ort

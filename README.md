@@ -30,10 +30,10 @@
 
 | 包 | 平台/工具链 | 内含 |
 |---|---|---|
-| `my_cpp_libs-0.1.7-win-x64-msvc.zip` | Windows x64 / MSVC 19.5x | ORT 1.23.2 + OpenCV 4.12（DLL 在 `bin/`）；**不含 ncnn** |
-| `my_cpp_libs-0.1.7-win-x64-mingw-basic.zip` | Windows x64 / MinGW GCC 15.2 | **基础包**：无 ORT/OpenCV（ABI 不兼容，见 Deps.cmake） |
-| `my_cpp_libs-0.1.7-linux-armv7-glibc239.tar.gz` | armv7-A 硬浮点（2024 SDK，**glibc ≥ 2.38**） | ORT 1.18.1 + OpenCV 4.12 |
-| `my_cpp_libs-0.1.7-linux-aarch64.tar.gz` | Pi 4B / 通用 aarch64（ARM GNU 14.2，glibc ≈ 2.40） | ORT 1.19.2 + OpenCV 4.12 |
+| `my_cpp_libs-0.1.9-win-x64-msvc.zip` | Windows x64 / MSVC 19.5x | ORT 1.23.2 + OpenCV 4.12（DLL 在 `bin/`）；**不含 ncnn** |
+| `my_cpp_libs-0.1.9-win-x64-mingw-basic.zip` | Windows x64 / MinGW GCC 15.2 | **基础包**：无 ORT/OpenCV（ABI 不兼容，见 Deps.cmake） |
+| `my_cpp_libs-0.1.9-linux-armv7-glibc239.tar.gz` | armv7-A 硬浮点（2024 SDK，**glibc ≥ 2.38**） | ORT 1.18.1 + OpenCV 4.12 |
+| `my_cpp_libs-0.1.9-linux-aarch64.tar.gz` | Pi 4B / 通用 aarch64（ARM GNU 14.2，glibc ≈ 2.40） | ORT 1.19.2 + OpenCV 4.12 |
 
 ```cmake
 find_package(my_cpp_libs CONFIG REQUIRED)
@@ -53,7 +53,7 @@ my_cpp_libs_copy_runtime_dlls(app)   # 仅 Windows
 
 ```powershell
 .\scripts\package-all.ps1          # 四个包 → dist/
-.\scripts\verify-package.ps1 -Package dist\my_cpp_libs-0.1.7-win-x64-msvc.zip
+.\scripts\verify-package.ps1 -Package dist\my_cpp_libs-0.1.9-win-x64-msvc.zip
 ```
 
 CI 里也有两个 `package-*` job（`package-linux` / `package-windows`）跑同一套 CPack 流程，
@@ -68,8 +68,12 @@ CI 里也有两个 `package-*` job（`package-linux` / `package-windows`）跑�
 | `win-x64-mingw-basic` | 本机/CI | 无 ORT/OpenCV（ABI 不兼容） |
 
 > 包名后缀是**显式参数**而不是猜出来的：glibc 版本 CMake 推不出来，必须由构建者给，
-> 否则很容易把"能编"误当成"能上板"。打包脚本在缺任何三方许可证时会打印
-> `[pkg] 找不到许可证 ...` —— 出现这行就说明这个包不该发布。
+> 否则很容易把"能编"误当成"能上板"。打包脚本在缺任何三方许可证时会直接
+> `FATAL_ERROR`（`cmake/licenses/` 里是自编依赖的兜底副本）—— 缺许可证的包不会被生成。
+>
+> CI 的 `windows-msvc` 与 `package-windows` 会传 `fetch-deps.ps1 -RequireOrtWin`：
+> 拿不到 ONNX Runtime 就让 job 失败，不再让 ml 静默 skip。官方 1.23.2 直链失效时，
+> 在仓库变量 `MYLIB_ORT_WIN_URL` 里指向可用的 zip 即可（不要改脚本）。
 
 ## 快速开始
 
@@ -157,7 +161,7 @@ python scripts/make_test_model.py models/identity_1x1x4.onnx
 
 | 项目 | 结果 |
 |---|---|
-| 单元测试 | 宿主端 **315 个用例**（无 OpenCV）/ **323 个**（有 OpenCV，含 cv 8 个），另有 no-exceptions 子集 160 个；<br>板端 **158 / 158 通过（2026-11-16 上板实测，全组件，2 秒跑完）** ← 0.1.0 时的历史数据 |
+| 单元测试 | 宿主端 **356 个用例**（无 OpenCV）/ **367 个**（有 OpenCV，含 cv 11 个），另有 no-exceptions 子集 178 个；<br>板端 **158 / 158 通过（2026-11-16 上板实测，全组件，2 秒跑完）** ← 0.1.0 时的历史数据 |
 | 板端性能（Zynq-7020） | ml 表格模型 ≈0.07~0.10 ms/次；dsp 全链路 67 ms；image 957 ms；net 36 ms；http 141 ms（见 [06 §0](docs/06-板端验证手册.md)） |
 | 板端性能（Pi 4B / aarch64） | **158/158 通过（1 秒）**；ml 0.016~0.017 ms/次；bench_cnn 74 ms（比 A9 快 10.4×）（见 [06 §0.7](docs/06-板端验证手册.md)） |
 | **全依赖上板** | ✅ 8 个三方库全部有 armv7 产物：Eigen / nlohmann / spdlog / stb / pocketfft（头文件或源码）+ ORT 1.18.1 + ncnn + **OpenCV 4.12（GLIBC_2.29）** |
@@ -223,7 +227,7 @@ include/my_cpp_libs/    对外公共头
 src/                    组件实现
 examples/               封装层示例 + 原生 API 示例 + 独立消费方工程
 tools/                  命令行工具（model_inspect）+ 模型生成脚本 + sklearn 导出工具
-tests/                  无依赖的单元测试（315 个用例，开启 OpenCV 时 323 个；另有 no-exceptions 子集 160 个）
+tests/                  无依赖的单元测试（356 个用例，开启 OpenCV 时 367 个；另有 no-exceptions 子集 178 个）
 models/                 测试模型（脚本生成：7 种 ONNX 形态 + ml/ 下的 sklearn 演示模型与 golden）
 scripts/                构建脚本、ONNX Runtime / OpenCV 交叉编译脚本
 third_party/            由 resources/*.zip 自动解压（不入库）
@@ -299,8 +303,8 @@ docs/                   规划、API、构建、推理、OpenCV、板端验证�
 | Eigen | MPL-2.0 |
 | pocketfft | BSD-3-Clause |
 | ncnn | BSD-3-Clause |
-| ONNX Runtime | Apache-2.0 |
+| ONNX Runtime | MIT |
 | OpenCV | Apache-2.0 |
 
 > `dist/` 里的 SDK 包内含 ONNX Runtime / OpenCV 的二进制，再分发时请一并保留它们的
-> 许可证与 NOTICE（Apache-2.0 要求）。
+> 许可证与 NOTICE（ORT 为 MIT；OpenCV 为 Apache-2.0）。

@@ -16,7 +16,11 @@
 #>
 [CmdletBinding()]
 param(
-    [switch] $WithOrtWin
+    [switch] $WithOrtWin,
+    # CI / 发布用：ORT 下载失败必须让任务失败，而不是让 ml 静默 skip。
+    [switch] $RequireOrtWin,
+    # 官方直链会变；CI 可用仓库变量覆盖（不改脚本）。
+    [string] $OrtWinUrl = 'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -90,15 +94,18 @@ Fetch 'eigen-5.0.0.zip'   'https://gitlab.com/libeigen/eigen/-/archive/5.0.0/eig
 Fetch 'spdlog-1.17.0.zip' 'https://github.com/gabime/spdlog/archive/refs/tags/v1.17.0.zip'
 Fetch 'json-include.zip'  'https://github.com/nlohmann/json/releases/download/v3.12.0/include.zip'
 
-if ($WithOrtWin) {
-    # 注意：这个直链在 2026-11-20 实测是 404（v1.19.2/1.20/1.21/1.22/1.23.0/1.23.2 全试过）。
-    # ONNX Runtime 的官方预编译包会改发布位置，所以这里**下载失败只告警**：
-    # 拿不到 ORT 时 infer 退回 stub、ml 用例会 skip —— 那是可接受的环境限制，
-    # 不该让整个 CI 因为一个三方下载地址变动而变红。
+if ($WithOrtWin -or $RequireOrtWin) {
+    # 注意：官方直链会随发布位置变化（本文件曾记录 v1.23.2 直链 404）。
+    # 本地默认容忍失败；CI/发布传 -RequireOrtWin，拿不到 ORT 必须让任务失败，
+    # 否则 ml 的 golden 用例会静默 skip，而流水线仍然全绿。
     try {
-        Fetch 'onnxruntime-win-x64-1.23.2.zip' `
-              'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip'
+        $ortName = Split-Path $OrtWinUrl -Leaf
+        Fetch $ortName $OrtWinUrl
     } catch {
+        if ($RequireOrtWin) {
+            throw "ONNX Runtime 下载失败（$($_.Exception.Message)）。CI/发布要求必须有 ORT；" +
+                  "可用 -OrtWinUrl 指定镜像或修好下载地址。"
+        }
         Write-Warning "ONNX Runtime 下载失败（$($_.Exception.Message)）—— infer 会退回 stub，ml 用例将跳过"
         if ($env:GITHUB_ACTIONS) { Write-Host "::warning::ONNX Runtime 预编译包下载失败：ml 用例本轮将跳过" }
     }

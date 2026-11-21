@@ -7,6 +7,8 @@
 // =============================================================================
 #include "test_framework.hpp"
 
+#include <my_cpp_libs/core/status.hpp>
+
 #include <cmath>
 #include <limits>
 
@@ -51,4 +53,18 @@ MYTEST_CASE(framework_registry_is_populated) {
         if (std::string(c.suite) == "framework") ++framework_cases;
     }
     CHECK(framework_cases >= 4);
+}
+
+// CHECK_RESULT 曾经是"两条裸语句"，放进不带大括号的 if/else 会编译错。
+// 这个 lambda 专门验证它现在是单语句 do{...}while(0)。
+MYTEST_CASE(framework_check_result_is_single_statement) {
+    auto body = []() -> void {
+        if (my::Result<int>(1).ok()) {
+            CHECK_RESULT(my::Result<int>(1));
+        } else {
+            CHECK(false);
+        }
+    };
+    body();
+    CHECK(true);
 }

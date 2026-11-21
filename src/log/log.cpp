@@ -1,8 +1,12 @@
 #include "my_cpp_libs/log/log.hpp"
 
+#include "my_cpp_libs/core/path_utf8.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -10,14 +14,102 @@
 
 #include <spdlog/async.h>
 #include <spdlog/details/thread_pool.h>
-#include <spdlog/sinks/basic_file_sink.h>
-#include <spdlog/sinks/rotating_file_sink.h>
+#include <spdlog/sinks/base_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/stdout_sinks.h>
 #include <spdlog/spdlog.h>
 
 namespace my::log {
 namespace {
+
+/// spdlog 的 file sink 在 Windows 上用 fopen(const char*)，按 ANSI 代码页解释路径。
+/// 这会让中文/日文日志路径静默写到乱码目录（实测：init 返回 Ok，文件却不在期望位置）。
+///
+/// 这里自己实现一个 UTF-8 安全的文件 sink：
+///   * 用 `core::to_path()` 打开文件（Windows 走 UTF-16）；
+///   * 保留按大小滚动（rotate_bytes/rotate_files），文件命名与 spdlog 一致（base.N）；
+///   * 继承 base_sink，加锁与 pattern 格式化仍由 spdlog 负责。
+class Utf8FileSink final : public spdlog::sinks::base_sink<std::mutex> {
+public:
+    Utf8FileSink(std::string path, std::size_t max_bytes, std::size_t max_files)
+        : path_(std::move(path)), max_bytes_(max_bytes), max_files_(max_files) {
+        open_append_();
+    }
+
+protected:
+    void sink_it_(const spdlog::details::log_msg& msg) override {
+        spdlog::memory_buf_t formatted;
+        base_sink<std::mutex>::formatter_->format(msg, formatted);
+
+        if (max_bytes_ > 0 && size_ > 0 && size_ + formatted.size() > max_bytes_) {
+            rotate_();
+        }
+        out_.write(formatted.data(), static_cast<std::streamsize>(formatted.size()));
+        if (!out_) {
+            throw spdlog::spdlog_ex("写入日志文件失败: " + path_);
+        }
+        size_ += formatted.size();
+    }
+
+    void flush_() override {
+        if (out_.is_open()) out_.flush();
+    }
+
+private:
+    void open_append_() {
+        out_.open(my::core::to_path(path_), std::ios::binary | std::ios::app);
+        if (!out_) {
+            throw spdlog::spdlog_ex("无法打开日志文件: " + path_);
+        }
+        std::error_code ec;
+        const auto      sz = std::filesystem::file_size(my::core::to_path(path_), ec);
+        size_              = ec ? 0 : static_cast<std::size_t>(sz);
+    }
+
+    std::string rotated_(std::size_t index) const {
+        return path_ + "." + std::to_string(index);
+    }
+
+    void rotate_() {
+        out_.flush();
+        out_.close();
+        if (max_files_ == 0) {  // 由 init() 拦住，这里只是兜底
+            open_append_();
+            return;
+        }
+
+        std::error_code ec;
+        std::filesystem::remove(my::core::to_path(rotated_(max_files_)), ec);
+
+        // base.1 -> base.2 -> ... -> base.N；Windows 上 rename 不覆盖，先删目标
+        for (std::size_t i = max_files_; i > 1; --i) {
+            const std::string from = rotated_(i - 1);
+            const std::string to   = rotated_(i);
+            ec.clear();
+            if (!std::filesystem::exists(my::core::to_path(from), ec)) continue;
+            ec.clear();
+            std::filesystem::remove(my::core::to_path(to), ec);
+            ec.clear();
+            std::filesystem::rename(my::core::to_path(from), my::core::to_path(to), ec);
+        }
+
+        ec.clear();
+        std::filesystem::remove(my::core::to_path(rotated_(1)), ec);
+        ec.clear();
+        std::filesystem::rename(my::core::to_path(path_), my::core::to_path(rotated_(1)), ec);
+        if (ec) {
+            // 滚动失败不应该丢当前这条日志：继续写回原文件，下一次再试
+            std::fprintf(stderr, "[my_cpp_libs] 日志滚动失败: %s\n", ec.message().c_str());
+        }
+        open_append_();
+    }
+
+    std::string   path_;
+    std::size_t   max_bytes_ = 0;
+    std::size_t   max_files_ = 0;
+    std::ofstream out_;
+    std::size_t   size_ = 0;
+};
 
 spdlog::level::level_enum to_spdlog(Level level) noexcept {
     switch (level) {
@@ -58,7 +150,11 @@ State& state() {
 /// 未初始化时的兜底输出：直写 stderr，不分配、不加锁（stdio 自带锁）
 void fallback_write(Level level, std::string_view msg) noexcept {
     if (msg.empty()) return;
-    std::fprintf(stderr, "[%s] %.*s\n", level_name(level), static_cast<int>(msg.size()), msg.data());
+    // 用 fwrite 而不是 %.*s：日志可能含内嵌 NUL（二进制报文），且 %.*s 的
+    // 精度是 int，>2GiB 会变成负值（读到 NUL 才停，越界读）。
+    std::fprintf(stderr, "[%s] ", level_name(level));
+    std::fwrite(msg.data(), 1, msg.size(), stderr);
+    std::fputc('\n', stderr);
     std::fflush(stderr);
 }
 
@@ -79,6 +175,17 @@ const char* level_name(Level level) noexcept {
 
 Status init(const Config& config) {
     try {
+        // async_queue_size == 0 会让 spdlog 的 circular_q 变成"容量 1 且恒满"，
+        // 第一条日志就永久阻塞。这是配置错误，必须在 init 阶段拒绝，不能等运行时挂死。
+        if (config.async && config.async_queue_size == 0) {
+            return Status(Errc::InvalidArgument,
+                          "async_queue_size 必须 >= 1（0 会让异步日志在第一条消息处挂死）");
+        }
+        if (config.rotate_bytes > 0 && config.rotate_files == 0) {
+            return Status(Errc::InvalidArgument,
+                          "rotate_files 必须 >= 1（rotate_bytes > 0 时）");
+        }
+
         // ---- 先在局部把新 logger 完整搭好；任何一步失败都不动现有配置 ----
         std::vector<spdlog::sink_ptr> sinks;
 
@@ -91,13 +198,10 @@ Status init(const Config& config) {
         }
 
         if (!config.file_path.empty()) {
-            if (config.rotate_bytes > 0) {
-                sinks.push_back(std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-                    config.file_path, config.rotate_bytes, config.rotate_files));
-            } else {
-                sinks.push_back(
-                    std::make_shared<spdlog::sinks::basic_file_sink_mt>(config.file_path, false));
-            }
+            // 用自实现的 UTF-8 安全 sink：spdlog 自带的 file sink 在 Windows 上
+            // 按 ANSI 打开路径，中文/日文目录会静默写错位置（0.1.9 及之前）。
+            sinks.push_back(std::make_shared<Utf8FileSink>(config.file_path, config.rotate_bytes,
+                                                           config.rotate_files));
         }
 
         if (sinks.empty()) {
@@ -106,7 +210,12 @@ Status init(const Config& config) {
         }
 
         for (auto& sink : sinks) {
-            sink->set_pattern(config.pattern);
+            try {
+                sink->set_pattern(config.pattern);
+            } catch (const std::exception& e) {
+                return Status(Errc::InvalidArgument,
+                              std::string("日志 pattern 非法: ") + e.what());
+            }
             sink->set_level(to_spdlog(config.level));
         }
 

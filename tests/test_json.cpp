@@ -295,3 +295,26 @@ MYTEST_CASE(json_set_creates_nested_containers) {
     CHECK_EQ(e.type_of("a.b[0].c"), Type::Integer);
 }
 
+// set() 失败不能留下已创建的中间节点（错误返回 = 文档未变）。
+MYTEST_CASE(json_set_failure_is_strong) {
+    Document d;
+    CHECK_OK(d.set("keep", 1));
+
+    auto st = d.set("a.b[1000000000]", 2);
+    CHECK(!st);
+    CHECK_EQ(st.code(), my::Errc::OutOfRange);
+
+    CHECK_EQ(d.type_of("a"), my::json::Type::Unknown);
+    CHECK(!d.contains("a"));
+    CHECK_OK_VALUE(keep, d.get<int>("keep"));
+    CHECK_EQ(keep, 1);
+
+    // 父节点类型冲突同样不能改坏原文档
+    CHECK_OK(d.set("x", std::string("str")));
+    auto conflict = d.set("x.y", 3);
+    CHECK(!conflict);
+    CHECK_EQ(d.type_of("x"), my::json::Type::String);
+    CHECK_OK_VALUE(x, d.get<std::string>("x"));
+    CHECK_EQ(x, std::string("str"));
+}
+

@@ -219,7 +219,10 @@ if(MYLIB_ENABLE_IMAGE)
         CXX_EXTENSIONS OFF
         POSITION_INDEPENDENT_CODE ON)
     if(MSVC)
-        target_compile_options(mylib_stb_impl PRIVATE /w)
+        # stb_impl.cpp 里有中文注释；MSVC 默认按 ANSI(936) 读源码，注释里的
+        # 多字节尾字节会吞掉后面的 #define（表现为 STBI_WINDOWS_UTF8 没生效）。
+        # 这个 target 为了屏蔽上游告警没有链 mylib_warnings，所以 /utf-8 要单独加。
+        target_compile_options(mylib_stb_impl PRIVATE /w /utf-8)
     else()
         target_compile_options(mylib_stb_impl PRIVATE -w)
     endif()

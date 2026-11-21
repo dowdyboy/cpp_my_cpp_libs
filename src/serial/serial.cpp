@@ -15,6 +15,8 @@
 
 #include "my_cpp_libs/serial/serial.hpp"
 
+#include "my_cpp_libs/core/path_utf8.hpp"
+
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
@@ -323,10 +325,14 @@ Result<Port> Port::open(std::string_view name, const Config& cfg) {
     Port p;
 #if defined(_WIN32)
     const std::string path = normalize_windows_name(name);
-    // dwShareMode = 0：独占。Windows 上串口被占用时 CreateFile 会返回 ERROR_ACCESS_DENIED，
-    // 这里把这种情况翻译成 Busy，比笼统的 IoError 更有用。
-    HANDLE h = ::CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-                             0, nullptr);
+    // 独占：dwShareMode=0；exclusive=false 时允许别的进程同时打开（监视/调试用）。
+    // 用 CreateFileW + core::to_path：UTF-8 设备名/符号链接在 Windows 上不会被按 ANSI 截断。
+    const DWORD share_mode = cfg.exclusive
+                                 ? 0
+                                 : (FILE_SHARE_READ | FILE_SHARE_WRITE);
+    const std::wstring wpath = my::core::to_path(path).native();
+    HANDLE h = ::CreateFileW(wpath.c_str(), GENERIC_READ | GENERIC_WRITE, share_mode, nullptr,
+                             OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         const DWORD err = ::GetLastError();
         if (err == ERROR_ACCESS_DENIED) {
@@ -537,11 +543,22 @@ Result<std::size_t> Port::write_some(const void* buf, std::size_t n,
     to.ReadTotalTimeoutMultiplier  = 0;
     to.ReadTotalTimeoutConstant    = 0;
     to.WriteTotalTimeoutMultiplier = 0;
-    to.WriteTotalTimeoutConstant   = static_cast<DWORD>(to_poll_ms(timeout) < 0 ? 0 : to_poll_ms(timeout));
+
+    const int ms = to_poll_ms(timeout);
+    // WriteTotalTimeoutConstant = 0 在 Windows 上表示**无限等待**（与 POSIX 的
+    // poll(0) 语义相反）。timeout==0 用 1ms 分片模拟"尽量不阻塞"；<0 才保留无限。
+    to.WriteTotalTimeoutConstant =
+        (ms < 0) ? 0u : static_cast<DWORD>(ms == 0 ? 1 : ms);
     if (!::SetCommTimeouts(h, &to)) return io_status("SetCommTimeouts", name_);
 
+    const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(
+        n, static_cast<std::size_t>(std::numeric_limits<DWORD>::max())));
     DWORD put = 0;
-    if (!::WriteFile(h, buf, static_cast<DWORD>(n), &put, nullptr)) {
+    if (!::WriteFile(h, buf, chunk, &put, nullptr)) {
+        const DWORD e = ::GetLastError();
+        // 有限超时到期：WriteFile 返回 FALSE，但 put 可能已经写出一部分。
+        // 头文件承诺"超时返回已写部分、status 仍为 Ok"，由 write_all 再决定是否重试。
+        if (e == ERROR_TIMEOUT) return static_cast<std::size_t>(put);
         return io_status("WriteFile", name_);
     }
     return static_cast<std::size_t>(put);
@@ -575,9 +592,28 @@ Result<std::size_t> Port::write_some(const void* buf, std::size_t n,
 Status Port::write_all(const void* buf, std::size_t n, std::chrono::milliseconds timeout) {
     if (n == 0) return Status{};
     const auto* p = static_cast<const std::uint8_t*>(buf);
-    std::size_t done = 0;
+    std::size_t done    = 0;
+    bool        attempted = false;
+    const auto  deadline  = std::chrono::steady_clock::now() + timeout;
+
     while (done < n) {
-        auto r = write_some(p + done, n - done, timeout);
+        std::chrono::milliseconds remaining = timeout;
+        if (timeout.count() > 0) {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+            if (left.count() <= 0) {
+                return Status(Errc::Timeout, "写超时: 已写 " + std::to_string(done) + "/" +
+                                                 std::to_string(n) + " 字节");
+            }
+            remaining = left;
+        } else if (timeout.count() == 0 && attempted) {
+            // 0 表示"尽力而为"：允许一次非阻塞尝试，没写完就按超时返回
+            return Status(Errc::Timeout,
+                          "写超时: 已写 " + std::to_string(done) + "/" + std::to_string(n) + " 字节");
+        }
+
+        auto r = write_some(p + done, n - done, remaining);
+        attempted = true;
         if (!r) return r.status();
         if (r.value() == 0) {
             return Status(Errc::Timeout,

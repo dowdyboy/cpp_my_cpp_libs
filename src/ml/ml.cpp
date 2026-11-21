@@ -16,11 +16,17 @@
 namespace my::ml {
 namespace {
 
-/// 把 onnx 路径换成同名 .json
+/// 把 onnx 路径换成同名 .json。
+///
+/// 只在**文件名**里找扩展名：`models/v1.0/net` 的目录名带点，按整条路径找
+/// 最后一个 '.' 会拼出 `models/v1.json`，sidecar 静默丢失。
 std::string sibling_json(const std::string& onnx_path) {
-    const auto pos = onnx_path.find_last_of('.');
-    if (pos == std::string::npos) return onnx_path + ".json";
-    return onnx_path.substr(0, pos) + ".json";
+    const auto slash = onnx_path.find_last_of("/\\");
+    const auto dot   = onnx_path.find_last_of('.');
+    if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) {
+        return onnx_path + ".json";
+    }
+    return onnx_path.substr(0, dot) + ".json";
 }
 
 bool file_exists(const std::string& path) {
@@ -146,7 +152,18 @@ Status Model::load_sidecar(const std::string& path) {
     }
 
     // 模型文件摘要（导出脚本写进去的）。没有这个字段就不校验 —— 兼容老 sidecar。
-    meta_.onnx_sha256 = d.get_or<std::string>("sha256", "");
+    // 注意：导出脚本把摘要写在 `model.sha256`（与 `model.onnx` 同级），不是顶层。
+    // 0.1.7~0.1.9 这里读的是顶层 "sha256"，导致校验永远不执行；顶层读取保留为
+    // 兼容老 sidecar 的退路。
+    meta_.onnx_sha256 = d.get_or<std::string>("model.sha256", "");
+    if (meta_.onnx_sha256.empty()) {
+        meta_.onnx_sha256 = d.get_or<std::string>("sha256", "");
+    }
+    if (!meta_.onnx_sha256.empty() && meta_.onnx_sha256.size() != 64) {
+        return Status(Errc::ParseError,
+                      "sidecar 的 model.sha256 必须是 64 位十六进制，实际长度 " +
+                          std::to_string(meta_.onnx_sha256.size()) + ": " + path);
+    }
 
     // ---- 输入 ----
     if (auto r = d.get<std::string>("input.name"); r) {

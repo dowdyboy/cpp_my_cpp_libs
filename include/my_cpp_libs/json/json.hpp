@@ -287,6 +287,8 @@ public:
         }
     }
 
+    /// 便捷读取：路径不存在**或类型不匹配**都返回 fallback。
+    /// 配置里需要区分"缺失/类型写错"时请用 get<T>() 检查 Status。
     template <class T>
     T get_or(std::string_view path, T fallback) const {
         auto r = get<T>(path);
@@ -298,14 +300,20 @@ public:
         auto tokens = detail::parse_path(path);
         if (!tokens) return tokens.status();
 
-        auto target = detail::resolve_create(value_, tokens.value());
-        if (!target) return target.status();
-
+        // 先在副本上解析/创建，成功后才替换 value_{}：失败不能留下半截中间节点
+        // （例如 set("a.b[1000000000]",1) 不应把文档改成 {"a":{"b":[]}}）。
         try {
+            Json copy   = value_;
+            auto target = detail::resolve_create(copy, tokens.value());
+            if (!target) return target.status();
+
             *target.value() = Json(std::forward<T>(value));
+            value_          = std::move(copy);
             return Ok();
         } catch (const std::exception& e) {
             return Status(Errc::RuntimeError, std::string("JSON 赋值失败: ") + e.what());
+        } catch (...) {
+            return Status(Errc::RuntimeError, "JSON 赋值失败: 未知错误");
         }
     }
 

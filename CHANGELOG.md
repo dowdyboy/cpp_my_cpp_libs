@@ -1,5 +1,103 @@
 # 变更记录
 
+## 未发布（基于 0.1.9）—— 第三轮巡检的 A 级与 B 级契约修复
+
+这一轮先把审计里的 A 级问题全部修掉（问题清单与证据见 `assess/audit-2026-11-20.md`）：
+
+1. **`ml` 的 sidecar SHA-256 校验真正生效**：读的是 `model.sha256`（导出脚本与
+   三个 sidecar 的实际 schema），不是顶层 `sha256`。0.1.7~0.1.9 期间该字段恒为空，
+   校验从未执行；MSVC+ORT 下 `ml_rejects_model_hash_mismatch` 修复前实测失败，现在通过。
+   顶层字段保留为老 sidecar 的兼容退路，并校验 64 位长度。
+2. **UTF-8 路径补齐 `log` / `image` / `cv` / `serial`**：
+   - `stb_impl.cpp` 定义 `STBI_WINDOWS_UTF8`/`STBIW_WINDOWS_UTF8`；MSVC 的 stb target
+     补 `/utf-8`（否则中文注释会吞掉后面的 `#define`，这是本次实测抓到的根因）；
+   - `log` 自己实现 UTF-8 文件 sink（保留滚动），不再用 spdlog 的 ANSI `fopen`；
+   - `cv::load/save` 改为"读字节 + imdecode / imencode + 自己落盘"；
+   - `serial` 改用 `CreateFileW`；`http::set_mount_point` 对 Windows 非 ASCII 目录明确报错。
+3. **HTTP 端口占用真的能发现**：服务端显式关掉 `SO_REUSEPORT`/改用
+   `SO_EXCLUSIVEADDRUSE`；`Server::Impl` 改 `shared_ptr`，handler 内 `stop()` 的 detach
+   不再有 UAF；`listen_async` 失败路径的 `join` 挪进锁内。
+4. **`image::prepare`/`cv::prepare`/`preprocess` 的缓冲上限**：画布、f32 张量、
+   `image_to_tensor`/`hwc_to_chw`/`normalize` 都先按 uint64 检查，超限返回
+   `OutOfRange`，不再让 `bad_alloc` 穿出 `Result`；`Image` 的 pixels 长度也会校验。
+5. **`log::init(async_queue_size=0)` 返回 `InvalidArgument`**（此前第一条日志会永久挂死）；
+   `rotate_files==0 && rotate_bytes>0` 同样拒绝。
+6. **扩展名解析只在文件名里找 `.`**：`output/v1.0/frame` 不再被当成扩展名；`ml` 的
+   sidecar 推导同样修复。
+7. **发布链不再"失败仍算成功"**：`fetch-deps.ps1` 新增 `-RequireOrtWin` 与可覆盖的
+   `-OrtWinUrl`；`package-windows` 必须真有 ORT 且带许可证；`Packaging.cmake` 缺任何
+   许可证直接 FATAL（`cmake/licenses/` 提供 ORT 兜底文本）；`verify-package.ps1` 判
+   消费方退出码、校验包内 ORT/许可证、交叉包校验 ELF e_machine；`package-all.ps1`
+   每一步判退出码并逐个调用 verify。
+8. **顺带修正的文档/事实**：ONNX Runtime 的许可证是 MIT（不是 Apache-2.0）；
+   README/docs 的 SDK 包名从 0.1.7/0.1.8 对齐到 0.1.9。
+
+### B 级契约修复（本轮追加）
+
+9. **`io::write_file` 真正原子**：临时文件独占创建（名字带 PID，跨进程不撞）、
+   写完 `fsync`/`FlushFileBuffers`、POSIX rename + 父目录 fsync /
+   Windows `MoveFileEx(REPLACE_EXISTING|WRITE_THROUGH)`；失败删除临时文件且旧目标不变。
+   顺带修好 `list_dir` 最后一次 `increment` 错误被吞、`exists/is_directory` 的假 `noexcept`。
+10. **JSON 失败不留副作用**：`Document::set` 在副本上解析/创建，成功才提交；
+    `Layered::add_defaults` 改为返回 `Status`，`add_layer` 先合并到副本再提交。
+11. **`net` 分帧错位有明确状态**：`recv_exact`/`read_line`/`read_frame` 消费半包后失败
+    会把 `desynced()` 置 true，后续分帧调用返回 `RuntimeError` 而不是从半个帧中间继续读；
+    `recv_from` 拒绝 >65535 的缓冲；`connect` 使用总 deadline、EINTR 不再重置超时窗口；
+    `send_to` 的 EINTR 在当前地址重试；socket 句柄哨兵统一为 `kInvalidFd`。
+12. **`serial` 的 Windows 超时语义对齐头文件**：`write_some(0)` 不再变成无限阻塞，
+    `ERROR_TIMEOUT` 返回已写字节数（Ok），`write_all` 的 timeout 是总预算；
+    `Config::exclusive=false` 在 Windows 上真正允许共享打开。
+13. **`infer` 契约补齐**：`Session` 明确非线程安全、输出只到下一次 run；
+    三个后端统一拒绝 `Tensor::valid()==false`；`Shape::elements`/`Tensor::byte_size`
+    做溢出检查；ncnn 拆包失败返回错误；`softmax` 失败不改调用方缓冲；
+    `topk`/`nms` 把 NaN 分数排在最后/丢弃坏框；`Ort::Env`/`MemoryInfo` 改为不析构指针。
+14. **DSP 契约**：`detect_bursts` 的 `min_len` 按边界细化后的真实样本数过滤；
+    `classify()` 把瞬时频率门限换算成 Hz（同一 FM 在 8k/48k 判决一致），
+    并把 **PSK 判在 FSK 之前**——真实 BPSK 的 two_level 也会接近 1，只有 quiet
+    能区分；`biquad_design` 拒绝 float 系数下不稳定的极低频率；`Agc` 遇到非有限样本
+    不再永久污染功率估计；`demod_am/fm` 的低通设计失败返回 `InvalidArgument` 而不是
+    静默输出未滤波结果。
+15. **`thread`**：`ThreadPool::create` 失败回滚按 shutdown 的锁协议置 stopping；
+    并发 `shutdown()` 后来者等待第一个 join 完成；`size()` 在 shutdown 后为 0。
+16. **其它**：`log` 兜底输出改用 `fwrite`（内嵌 NUL/>2GiB 安全）、pattern 错误映射为
+    `InvalidArgument`；`path_utf8` 用 `MB_ERR_INVALID_CHARS` 让非法 UTF-8 真正走回退分支；
+    `BuildInfo::summary` 的静态字符串改为不析构；`cv::prepare` 的 `scale_x/scale_y`
+    改用取整后的实际比例（与 `my::image` 一致）；`image::prepare_file` 支持灰度+alpha PNG。
+17. **补齐 B 级测试缺口**（用例 340 → 356）：
+    - HTTP：PATCH/OPTIONS、自定义响应头、handler 异常 → 500、阻塞 `listen()`、
+      stop 后重新 bind；413 改为严格断言（不再接受"连接被关掉"）；PUT/DELETE 测试的
+      `stored` 加锁，413 的 `handler_ran` 改 atomic（消掉 TSan 数据竞争）。
+    - net：`recv` 超时、`set_timeout(0)` 恢复阻塞、分片帧头、半负载超时、
+      UDP 广播/组播数据面（环境不支持时 SKIP）。
+    - serial：POSIX PTY 上 `write_some` 的 50ms/0ms 超时有界性。
+    - infer：7 个 ORT 模型端口形态（dyn_batch/multi_io/int64/fp16/u8/small_cnn/
+      softmax_1d）与 ncnn small_cnn 真跑；无后端时 SKIP（CI 的 ORT job 仍严格）。
+    - hash：UTF-8 路径的文件摘要；framework：`CHECK_RESULT` 单语句回归；
+      gaps：线程池真实并行栅栏（旧测试串行也能过）、unletterbox 两个框全部坐标；
+      DSP：真实 BPSK 端到端 `analyze → classify`（抓到上面的 PSK/FSK 顺序 bug）。
+
+### B 契约批次验证
+
+| 配置 | 结果 |
+|---|---|
+| MinGW x64 Release | **358/358 CTest 通过**（356 用例 + 2 守卫；23 skip） |
+| Linux（WSL Ubuntu 24.04）Release | **358/358 通过**（356 用例 + 2 守卫；12 skip） |
+| MSVC + ORT + OpenCV + ncnn | **367 用例，0 失败，11 skip** |
+| `-fno-exceptions` 子集 | **178 用例，0 失败** |
+| TSan（B 批次涉及套件） | io/net/thread/http/log 共 103 用例，无 ThreadSanitizer 报告 |
+| ASan（B 批次涉及套件） | io/net/thread/http/log/image/preprocess/dsp 共 205 用例，无 AddressSanitizer 报告 |
+
+### 验证（A 批次）
+
+| 配置 | 结果 |
+|---|---|
+| MinGW x64 Release | **327/327 CTest 通过**（325 用例 + 2 守卫；20 skip） |
+| Linux（WSL Ubuntu 24.04）Release | **327/327 通过**（325 用例 + 2 守卫；10 skip） |
+| MSVC + ORT + OpenCV | **335 用例，0 失败，10 skip**；ml 哈希用例从红转绿 |
+| `-fno-exceptions` 子集 | **160 用例，0 失败** |
+| TSan（HTTP/log 套件） | HTTP 21 + log 16 用例，无 ThreadSanitizer 报告 |
+| 发布链 | 四个 0.1.9 包重新生成并逐个解包验证通过；armv7 包已确认带 ORT 许可证与第三方声明 |
+
 ## 0.1.9（2026-11-20）—— 补齐 0.1.8 留下的测试空洞
 
 0.1.8 的审计列了七类"没测到"的东西，这一版把它们填上：**用例 300 → 315**，

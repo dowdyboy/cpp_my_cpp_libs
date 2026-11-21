@@ -77,6 +77,11 @@ public:
     /// 收满 size 字节；对端提前关闭 → IoError
     /// 上限 kMaxBufferBytes：一次分配超过它的请求直接返回 OutOfRange，
     /// 而不是让 bad_alloc 从 Result 边界穿出去。
+    ///
+    /// **失败语义**：超时/错误时如果已经消费了部分字节，流已无法安全重试，
+    /// 本函数会把 `desynced()` 置为 true（句柄保留，便于查 peer/显式 close）；
+    /// 后续 recv_exact/read_line/read_frame 会返回 RuntimeError。只有
+    /// got==0 的超时/错误才会保留可重试状态。
     MYLIB_API Result<Bytes> recv_exact(std::size_t size);
 
     /// 半关闭写端（告诉对端"我不再发了"，读端仍然可用）
@@ -84,6 +89,11 @@ public:
 
     MYLIB_API void close() noexcept;
     MYLIB_API bool valid() const noexcept;
+
+    /// 分帧/recv_exact 是否已经消费了半个消息而失败（流无法安全重试）。
+    /// 为 true 时 recv_exact/read_frame/read_line 会返回 RuntimeError；只能 close 重连。
+    /// 原始 recv()/send() 不阻止，但调用方要自己知道字节边界已经不可信。
+    MYLIB_API bool desynced() const noexcept;
 
     /// 底层句柄。Windows 上是 SOCKET（UINT_PTR），所以必须用 intptr_t 返回：
     /// 原来返回 int 会截断 64 位句柄。
@@ -95,8 +105,11 @@ public:
 
 private:
     friend class TcpListener;
+    friend Status read_line(TcpSocket& sock, std::string& line, std::size_t max_len);
+    friend Result<Bytes> read_frame(TcpSocket& sock, std::size_t max_size);
     explicit TcpSocket(std::intptr_t fd) noexcept : fd_(fd) {}
     std::intptr_t fd_ = -1;
+    bool          desynced_ = false;
 };
 
 class TcpListener {
@@ -150,7 +163,7 @@ public:
     /// 绑定到本地地址（host 为空表示 INADDR_ANY）
     MYLIB_API static Result<UdpSocket> bind(const Endpoint& ep);
 
-    /// 只发不收的 socket（系统在第一次 send_to 时分配端口）
+    /// 只发不收的 socket（IPv4；系统在第一次 send_to 时分配端口）
     MYLIB_API static Result<UdpSocket> open();
 
     MYLIB_API Status set_timeout(int ms);
@@ -164,8 +177,8 @@ public:
 
     MYLIB_API Result<std::size_t> send_to(const Endpoint& ep, const void* data,
                                           std::size_t size);
-    /// 收一个数据报；max_size 是缓冲上限
-    MYLIB_API Result<Datagram> recv_from(std::size_t max_size = 64 * 1024);
+    /// 收一个数据报；max_size 是缓冲上限（UDP 数据报上限 65535，超过直接 OutOfRange）
+    MYLIB_API Result<Datagram> recv_from(std::size_t max_size = 65535);
 
     MYLIB_API std::uint16_t port() const;
     MYLIB_API void          close() noexcept;
@@ -179,13 +192,17 @@ private:
 //  两种最常用的应用层分帧（板端 <-> 上位机自定义协议基本就这两种）
 // =============================================================================
 /// 读一行（到 '\n' 为止，自动去掉行尾 '\r'）。max_len 防止对端发垃圾把内存吃光。
+/// 超过 max_len 时流已错位：desynced() 被置 true，后续分帧调用返回 RuntimeError，
+/// 调用方必须 close 重连。
 MYLIB_API Status read_line(TcpSocket& sock, std::string& line, std::size_t max_len = 8192);
 
 /// 4 字节大端长度前缀 + 负载
 MYLIB_API Status write_frame(TcpSocket& sock, const void* data, std::size_t size);
 MYLIB_API Status write_frame(TcpSocket& sock, const std::string& text);
 
-/// 读一帧；max_size 防止伪造的长度字段撑爆内存
+/// 读一帧；max_size 防止伪造的长度字段撑爆内存。
+/// 长度超过 max_size 时负载还留在流里，无法安全丢弃：desynced() 被置 true，
+/// 调用方必须 close 重连。
 MYLIB_API Result<Bytes> read_frame(TcpSocket& sock, std::size_t max_size = 16 * 1024 * 1024);
 
 }  // namespace my::net

@@ -1,9 +1,12 @@
 #include "test_framework.hpp"
 
+#include <my_cpp_libs/core/path_utf8.hpp>
 #include <my_cpp_libs/cv/image.hpp>
 #include <my_cpp_libs/infer/preprocess.hpp>
 
+#include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 // 注意：本文件只在 MYLIB_ENABLE_CV=ON 且找到 OpenCV 时参与编译
@@ -169,4 +172,64 @@ MYTEST_CASE(cv_unletterbox_boxes) {
     CHECK_NEAR(box[1], 0.0, 1e-3);
     CHECK_NEAR(box[2], 160.0, 1e-3);
     CHECK_NEAR(box[3], 160.0, 1e-3);  // (36-4)/0.2 = 160
+}
+
+// 与 my::image 对齐：scale_x/scale_y 用取整后的实际缩放比，而不是理想比例，
+// 否则逆变换会有亚像素偏差（头文件承诺两个组件的 Letterbox 语义一致）。
+MYTEST_CASE(cv_prepare_letterbox_uses_rounded_scale) {
+    my::cv::Image img(77, 101, CV_8UC3, ::cv::Scalar(0, 0, 0));  // 101x77 -> 32x32
+
+    my::cv::PreprocessSpec spec;
+    spec.input_width  = 32;
+    spec.input_height = 32;
+    spec.keep_aspect  = true;
+
+    auto prep = my::cv::prepare(img, spec);
+    CHECK_RESULT(prep);
+
+    // new_w=32, new_h=round(77*32/101)=24，实际比例分别为 32/101 与 24/77
+    CHECK_NEAR(prep.value().letterbox.scale_x, 32.0 / 101.0, 1e-6);
+    CHECK_NEAR(prep.value().letterbox.scale_y, 24.0 / 77.0, 1e-6);
+    CHECK_NEAR(prep.value().letterbox.scale,
+               std::min(32.0 / 101.0, 24.0 / 77.0), 1e-6);
+    CHECK_EQ(prep.value().letterbox.pad_x, 0);
+    CHECK_EQ(prep.value().letterbox.pad_y, (32 - 24) / 2);
+}
+
+// imread/imwrite 在 Windows 上按 ANSI 打开路径；改为"读字节 + imdecode /
+// imencode + 自己落盘"后，中文路径必须可用。
+MYTEST_CASE(cv_utf8_path_roundtrip) {
+    std::error_code ec;
+    const std::string dir = "output/中文图像";
+    std::filesystem::create_directories(my::core::to_path(dir), ec);
+    CHECK(!ec);
+
+    const std::string path = dir + "/测试.png";
+    std::filesystem::remove(my::core::to_path(path), ec);
+
+    my::cv::Image img(6, 8, CV_8UC3, ::cv::Scalar(1, 2, 3));
+    CHECK_OK(my::cv::save(path, img));
+    CHECK(std::filesystem::exists(my::core::to_path(path)));
+
+    auto loaded = my::cv::load(path);
+    CHECK_RESULT(loaded);
+    CHECK_EQ(loaded.value().cols, 8);
+    CHECK_EQ(loaded.value().rows, 6);
+    CHECK_EQ(loaded.value().channels(), 3);
+
+    std::filesystem::remove(my::core::to_path(path), ec);
+    std::filesystem::remove(my::core::to_path(dir), ec);
+}
+
+// 画布/张量分配必须有上限，不能把 cv::Exception / bad_alloc 抛出 Result。
+MYTEST_CASE(cv_prepare_rejects_huge_canvas) {
+    my::cv::Image img(1, 1000, CV_8UC3, ::cv::Scalar(0, 0, 0));
+
+    my::cv::PreprocessSpec spec;
+    spec.input_width  = 200000;
+    spec.input_height = 200000;
+
+    auto r = my::cv::prepare(img, spec);
+    CHECK(!r);
+    CHECK_EQ(r.status().code(), my::Errc::OutOfRange);
 }

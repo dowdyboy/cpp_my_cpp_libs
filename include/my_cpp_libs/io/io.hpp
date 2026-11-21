@@ -11,8 +11,10 @@
 //  设计约定：
 //    * 全部用 std::filesystem 的 **error_code 重载**，不抛异常
 //      —— 这样 io 组件可以进 -fno-exceptions 子集；
-//    * write_file 是**原子**的：先写同目录临时文件，再 rename 覆盖。
-//      断电/被 kill 时要么是旧内容、要么是新内容，不会出现半截文件；
+//    * write_file 是**原子**的：先写同目录临时文件（fsync/FlushFileBuffers），
+//      再用 rename/MoveFileEx(REPLACE_EXISTING) 替换。进程被 kill 或断电后
+//      要么是旧内容、要么是新内容，不会出现半截文件（依赖底层文件系统的持久化语义）；
+//      写失败不会留下临时文件，两个进程同时写同一目标也不会撞临时名。
 //    * 路径一律 UTF-8 std::string；Windows 上内部显式转 UTF-16 再交给文件系统，
 //      所以中文/日文路径可用（0.1.7 之前这条其实没实现，只在文档里声称过）。
 // =============================================================================
@@ -34,8 +36,8 @@ struct FileInfo {
 };
 
 // ----------------------------------------------------------------------------- 查询
-MYLIB_API bool      exists(std::string_view path) noexcept;
-MYLIB_API bool      is_directory(std::string_view path) noexcept;
+MYLIB_API bool      exists(std::string_view path);
+MYLIB_API bool      is_directory(std::string_view path);
 MYLIB_API Result<FileInfo> info(std::string_view path);
 
 /// 递归列目录，返回**排好序**的条目名（不含 "." / ".."

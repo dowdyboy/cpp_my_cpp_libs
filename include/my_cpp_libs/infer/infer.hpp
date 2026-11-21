@@ -91,9 +91,7 @@ struct Feed {
 struct Outcome {
     std::string name;
     Tensor      tensor;
-};
-
-struct Options {
+};struct Options {
     /// 后端名；空串表示使用默认后端
     std::string backend;
     /// 模型路径（onnx / 后端自有格式）
@@ -110,6 +108,9 @@ class Session {
 public:
     virtual ~Session() = default;
 
+    /// 线程安全：**非线程安全**。run() 会把本次输出存在 Session 内部，下一次 run()
+    /// （包括失败的那次）会覆盖/释放上一次的 Outcome。同一 Session 不要并发 run；
+    /// 多线程请各自 create_session（ORT 本身的 Ort::Session 是线程安全的，这一层不是）。
     virtual const char* backend_name() const noexcept = 0;
 
     virtual const std::vector<Port>& inputs() const noexcept  = 0;

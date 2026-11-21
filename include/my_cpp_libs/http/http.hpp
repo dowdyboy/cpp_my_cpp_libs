@@ -129,6 +129,10 @@ struct ServerOptions {
     int         read_timeout_s    = 5;
     int         write_timeout_s   = 5;
     std::size_t max_payload_bytes = 8 * 1024 * 1024;
+    /// Windows 专用取舍：false（默认）= SO_EXCLUSIVEADDRUSE，端口被占用时 create()
+    /// 能发现；true = SO_REUSEADDR，重启后能立刻重绑，但同一端口也能被第二个 Server
+    /// 绑上（请求随机分流）。POSIX 下始终保留 SO_REUSEADDR（不允许重复监听）。
+    bool reuse_addr = false;
 };
 
 class Server {
@@ -155,14 +159,17 @@ public:
     MYLIB_API void   del(const std::string& path, Handler handler);
     MYLIB_API void   options(const std::string& path, Handler handler);
 
-    /// 静态文件目录（可选）
+    /// 静态文件目录（可选）。目录本身必须是 UTF-8 路径；Windows 上 httplib 的静态文件
+    /// 读取仍走 ANSI，因此非 ASCII 目录会在这里被明确拒绝（而不是静默 404）。
     MYLIB_API Status set_mount_point(const std::string& mount_point, const std::string& dir);
 
     /// 阻塞直到 stop()
     MYLIB_API Status listen();
     /// 后台线程启动（测试/业务里非阻塞启动）
     MYLIB_API Status listen_async();
-    /// 停止并等待线程结束
+    /// 停止。常规路径会 join 监听线程；**如果是在 handler 内部调用，只置停止标志并
+    /// detach（否则监听线程 join worker、worker 等监听线程会死锁），返回时线程可能
+    /// 还没退出。需要确认“彻底停了”请轮询 running()==false 后再析构。**
     MYLIB_API void stop();
 
     MYLIB_API std::uint16_t port() const;
@@ -170,7 +177,7 @@ public:
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    std::shared_ptr<Impl> impl_;
 };
 
 }  // namespace my::http

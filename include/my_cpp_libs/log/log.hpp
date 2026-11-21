@@ -42,16 +42,17 @@ struct Config {
     /// 控制台是否着色
     bool use_color = true;
 
-    /// 文件输出路径；为空则不写文件
+    /// 文件输出路径（UTF-8；Windows 上内部转 UTF-16，中文/日文目录可用）；为空则不写文件
     std::string file_path;
     /// 滚动阈值（字节），0 表示不滚动
     std::size_t rotate_bytes = 10u * 1024u * 1024u;
-    /// 保留的滚动文件数
+    /// 保留的滚动文件数（rotate_bytes > 0 时必须 >= 1）
     std::size_t rotate_files = 3;
 
     /// 异步日志（适合高吞吐；退出前必须 shutdown() 或 flush()）
     /// 线程池由本库自己持有，不覆盖宿主的 spdlog 全局线程池。
     bool        async = false;
+    /// 异步队列长度；必须 >= 1（0 会让第一条日志永久阻塞，init() 会拒绝）
     std::size_t async_queue_size = 8192;
     /// 异步线程策略：block=队列满时阻塞，overrun_oldest=丢弃最旧
     bool async_block_on_full = true;
@@ -96,6 +97,7 @@ MYLIB_API void flush() noexcept;
 // -----------------------------------------------------------------------------
 /// 自定义 sink：设置后所有日志（含文件/控制台）额外转发到这里。
 /// 典型用途：Zynq 的 UART、Windows 调试器输出、GUI 日志面板。
+/// 注意：message 是 string_view，**只在该回调执行期间有效**；需要保存请自己拷贝。
 using Sink = std::function<void(Level level, std::string_view message)>;
 
 MYLIB_API void set_sink(Sink sink);

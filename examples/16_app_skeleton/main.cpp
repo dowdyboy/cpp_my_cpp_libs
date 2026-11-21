@@ -39,7 +39,10 @@ int main(int argc, char** argv) {
     (void)defaults.set("output.path", "skeleton_result.json");
 
     my::json::Layered cfg;
-    cfg.add_defaults(std::move(defaults));
+    if (auto st = cfg.add_defaults(std::move(defaults)); !st) {
+        std::printf("默认配置合并失败: %s\n", st.to_string().c_str());
+        return 1;
+    }
 
     // 文件不存在不算错；存在但写坏了才报错
     if (auto st = cfg.add_file_if_exists("config.json"); !st) {

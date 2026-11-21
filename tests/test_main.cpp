@@ -9,7 +9,7 @@
 //   mylib_tests --suite=preprocess          跑一个套件
 //   mylib_tests --filter=nms                按用例名子串
 //   mylib_tests --list                      列出所有用例（suite:name）
-//   mylib_tests --expect-cases=158          用例总数必须正好是 158（守卫"用例静默消失"）
+//   mylib_tests --expect-cases=356          用例总数必须正好是 356（守卫"用例静默消失"）
 //   mylib_tests --fail-on-skip              有 skip 的用例就判失败
 int main(int argc, char** argv) {
     mytest::RunOptions opt;

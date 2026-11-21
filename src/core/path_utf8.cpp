@@ -22,14 +22,17 @@ namespace my::core {
 std::filesystem::path to_path(std::string_view utf8) {
 #if defined(_WIN32)
     if (utf8.empty()) return std::filesystem::path();
-    const int wlen = ::MultiByteToWideChar(CP_UTF8, 0, utf8.data(),
-                                           static_cast<int>(utf8.size()), nullptr, 0);
+    // MB_ERR_INVALID_CHARS：非法 UTF-8 必须返回 0，才能走下面"退回原样"的分支。
+    // flags=0 会把非法字节替换成 U+FFFD 并返回非 0，等于静默改写路径。
+    const int wlen = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(),
+                                            static_cast<int>(utf8.size()), nullptr, 0);
     if (wlen <= 0) {
         // 不是合法 UTF-8：退回原样（至少不崩，行为与 0.1.7 之前一致）
         return std::filesystem::path(std::string(utf8));
     }
     std::wstring w(static_cast<std::size_t>(wlen), L'\0');
-    ::MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), w.data(), wlen);
+    ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(),
+                          static_cast<int>(utf8.size()), w.data(), wlen);
     return std::filesystem::path(w);
 #else
     return std::filesystem::path(std::string(utf8));

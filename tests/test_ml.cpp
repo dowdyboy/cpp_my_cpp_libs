@@ -121,6 +121,9 @@ MYTEST_CASE(ml_load_iris_meta) {
     CHECK(meta.label_output == "label");
     CHECK(meta.score_output == "probabilities");
     CHECK(meta.format == "my_cpp_libs.ml/1");
+    // 0.1.9 之前读错键路径（顶层 sha256 vs model.sha256），这个字段恒为空，
+    // 哈希校验静默不执行。长度断言是最便宜的守门方式。
+    CHECK_EQ(meta.onnx_sha256.size(), std::size_t{64});
     CHECK(std::string(m.backend()) == "onnxruntime");
 }
 
@@ -310,4 +313,41 @@ MYTEST_CASE(ml_rejects_model_hash_mismatch) {
     // 明确关掉校验时应当加载成功（模型本身是好的）
     auto relaxed = my::ml::Model::load(tmp_onnx, tmp_json, /*verify_hash=*/false);
     CHECK(relaxed.ok());
+}
+
+// sidecar 推导只能在**文件名**里找扩展名：目录名带点时不能拼出 v1.json。
+MYTEST_CASE(ml_sidecar_in_dotted_directory) {
+    if (!ml_ready()) MYTEST_SKIP("没有可用的推理后端");
+
+    const std::string src_onnx = models_root() + "/ml/iris_logreg.onnx";
+    const std::string src_json = models_root() + "/ml/iris_logreg.json";
+    auto              onnx_txt = my::io::read_file(src_onnx);
+    auto              json_txt = my::io::read_file(src_json);
+    CHECK(onnx_txt.ok());
+    CHECK(json_txt.ok());
+    if (!onnx_txt.ok() || !json_txt.ok()) return;
+
+#if defined(_WIN32)
+    const std::string dir =
+        std::string(std::getenv("TEMP") ? std::getenv("TEMP") : ".") + "\\mylib_ml_v1.0";
+#else
+    const std::string dir =
+        std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp") + "/mylib_ml_v1.0";
+#endif
+    // 文件名故意不带扩展名：旧实现会用目录名里的 ".0" 当扩展名，去找 v1.json
+    const std::string net    = dir + "/net";
+    const std::string sidecar = net + ".json";
+    (void)my::io::create_directories(dir);
+    CHECK(my::io::write_file(net, onnx_txt.value()).ok());
+    CHECK(my::io::write_file(sidecar, json_txt.value()).ok());
+
+    auto model = my::ml::Model::load(net);
+    CHECK_RESULT(model);
+    CHECK_EQ(model.value().meta().n_features, 4);
+    CHECK_EQ(model.value().meta().classes.size(), std::size_t{3});
+    CHECK_EQ(model.value().meta().onnx_sha256.size(), std::size_t{64});
+
+    (void)my::io::remove(net);
+    (void)my::io::remove(sidecar);
+    (void)my::io::remove_all(dir);
 }

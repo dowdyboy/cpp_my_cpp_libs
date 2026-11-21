@@ -204,7 +204,7 @@ struct Burst {
 /// 突发检测：滑窗 RMS -> 相对噪声底的 dB -> 门限 -> 膨胀合并 -> 最短长度过滤。
 /// @param window      滑窗长度（样本），建议 >= 1 个符号周期
 /// @param threshold_db 高出噪声底多少 dB 算"有信号"
-/// @param min_len     短于它的段丢弃（样本数）；0 表示按 window 的一半
+/// @param min_len     短于它的段丢弃（**边界细化后的真实样本数**）；0 表示按 window 的一半
 MYLIB_API std::vector<Burst> detect_bursts(const Samples& x, std::size_t window,
                                            float threshold_db = 10.0f, std::size_t min_len = 0);
 
@@ -213,6 +213,11 @@ MYLIB_API std::vector<Burst> detect_bursts(const Samples& x, std::size_t window,
 // =============================================================================
 /// 单段信号的调制特征。全部是"可解释、可单独验证"的量，不做黑盒。
 struct Features {
+    /// analyze() 填入的采样率（Hz）。手工构造 Features 调 classify() 时若为 0，
+    /// 按 8 kHz 解释（兼容旧行为）；瞬时频率类阈值统一换算成 Hz 再比较，
+    /// 否则同一 FM 信号在 8k/48k 下会得到不同判决。
+    double sample_rate_hz = 0.0;
+
     double center_freq_hz = 0.0;  ///< 频谱重心（相对 0 Hz 的偏移）
     double bandwidth_hz   = 0.0;  ///< -3 dB 带宽（只对单载波有意义）
     double snr_db         = 0.0;
@@ -245,11 +250,11 @@ MYLIB_API Classification classify(const Features& f);
 // =============================================================================
 //  解调
 // =============================================================================
-/// AM：包络检波 + 去直流 + 低通（截止默认 0.5 × 符号率，未知时用 fs/200）
+/// AM：包络检波 + 去直流 + 低通（audio_cutoff_hz 必须 < fs/2；0 表示 fs/200，负数报错）
 MYLIB_API Result<Samples> demod_am(const Samples& x, double sample_rate,
                                    double audio_cutoff_hz = 0.0);
 
-/// FM：正交鉴频（瞬时频率）+ 去直流 + 低通
+/// FM：正交鉴频（瞬时频率）+ 去直流 + 低通（audio_cutoff_hz 必须 < fs/2；0 表示 fs/200）
 MYLIB_API Result<Samples> demod_fm(const Samples& x, double sample_rate,
                                    double audio_cutoff_hz = 0.0);
 

@@ -9,8 +9,12 @@
 
 #include "my_cpp_libs/image/image.hpp"
 
+#include "my_cpp_libs/core/path_utf8.hpp"
+
 #include <cstdio>
 #include <cstdint>
+#include <filesystem>
+#include <string>
 
 #include "test_framework.hpp"
 
@@ -364,4 +368,121 @@ MYTEST_CASE(image_prepare_rejects_zero_dim) {
     auto zero_h       = my::image::prepare(src, spec);
     CHECK(!zero_h);
     CHECK_EQ(zero_h.status().code(), my::Errc::InvalidArgument);
+}
+
+// 0.1.9 之前：stb 在 Windows 上按 ANSI 打开路径，中文/日文目录直接失败。
+// 修复后必须能"写进去 + 读回来"。
+MYTEST_CASE(image_utf8_path_roundtrip) {
+    const std::string dir = "output/中文图像";
+    std::error_code   ec;
+    std::filesystem::create_directories(my::core::to_path(dir), ec);
+    CHECK(!ec);
+
+    const std::string path = dir + "/测试图片.png";
+    std::filesystem::remove(my::core::to_path(path), ec);
+
+    Image src = make_image(5, 4, 3);
+    for (std::size_t i = 0; i < src.pixels.size(); ++i) {
+        src.pixels[i] = static_cast<std::uint8_t>((i * 17u + 3u) & 0xFFu);
+    }
+
+    CHECK_OK(my::image::save(path, src));
+    CHECK(std::filesystem::exists(my::core::to_path(path)));
+
+    CHECK_OK_VALUE(back, my::image::load(path, 3));
+    CHECK_EQ(back.width, 5);
+    CHECK_EQ(back.height, 4);
+    CHECK_EQ(back.pixels.size(), src.pixels.size());
+    for (std::size_t i = 0; i < src.pixels.size(); ++i) {
+        CHECK_EQ(back.pixels[i], src.pixels[i]);
+    }
+
+    std::filesystem::remove(my::core::to_path(path), ec);
+    std::filesystem::remove(my::core::to_path(dir), ec);
+}
+
+// 灰度+alpha（2 通道）PNG：load(path,0) 会明确拒绝，但 prepare_file 必须可用
+// （内部显式按 3 通道解码，prepare 不支持 2 通道）。
+MYTEST_CASE(image_prepare_file_handles_gray_alpha_png) {
+    const std::string path = "output/gray_alpha.png";
+    std::error_code   ec;
+    std::filesystem::create_directories(my::core::to_path("output"), ec);
+    std::filesystem::remove(my::core::to_path(path), ec);
+
+    Image src = make_image(4, 4, 2);
+    for (std::size_t i = 0; i < src.pixels.size(); ++i) {
+        src.pixels[i] = static_cast<std::uint8_t>((i * 13u) & 0xFFu);
+    }
+    CHECK_OK(my::image::save(path, src));
+
+    auto raw = my::image::load(path, 0);
+    CHECK(!raw);
+    CHECK_EQ(raw.status().code(), my::Errc::Unsupported);
+
+    my::image::PreprocessSpec spec;
+    spec.input_width  = 4;
+    spec.input_height = 4;
+    spec.keep_aspect  = false;
+    auto prep = my::image::prepare_file(path, spec);
+    CHECK_RESULT(prep);
+    CHECK_EQ(prep.value().channels, 3);
+
+    std::filesystem::remove(my::core::to_path(path), ec);
+}
+
+// 目录名带点时不能把目录当扩展名：output/v1.0/frame 应该按"没有扩展名"处理（PNG）。
+MYTEST_CASE(image_save_ignores_dots_in_directory) {
+    const std::string dir = "output/v1.0";
+    std::error_code   ec;
+    std::filesystem::create_directories(my::core::to_path(dir), ec);
+    CHECK(!ec);
+
+    const std::string path = dir + "/frame";
+    std::filesystem::remove(my::core::to_path(path), ec);
+
+    Image src = make_image(2, 2, 3);
+    src.pixels.assign(2u * 2u * 3u, 200);
+
+    CHECK_OK(my::image::save(path, src));
+    CHECK_OK_VALUE(back, my::image::load(path, 3));
+    CHECK_EQ(back.width, 2);
+    CHECK_EQ(back.height, 2);
+
+    std::filesystem::remove(my::core::to_path(path), ec);
+    std::filesystem::remove(my::core::to_path(dir), ec);
+}
+
+// prepare 的画布/张量必须有上限：大源图 + 大输入不能把 bad_alloc 穿出 Result。
+MYTEST_CASE(image_prepare_rejects_huge_canvas) {
+    Image src = make_image(1000, 1, 3);
+    src.pixels.assign(1000u * 1u * 3u, 10);
+
+    my::image::PreprocessSpec spec;
+    spec.input_width  = 200000;
+    spec.input_height = 200000;
+
+    auto r = my::image::prepare(src, spec);
+    CHECK(!r);
+    CHECK_EQ(r.status().code(), my::Errc::OutOfRange);
+}
+
+// Image 是公开结构体，手工构造时 pixels 可能小于 width*height*channels；
+// 不能按元数据去读越界内存。
+MYTEST_CASE(image_rejects_inconsistent_pixel_buffer) {
+    Image bad;
+    bad.width    = 10;
+    bad.height   = 10;
+    bad.channels = 3;
+    bad.pixels.assign(3, 0);  // 远小于 300
+
+    my::image::PreprocessSpec spec;
+    auto                      prep = my::image::prepare(bad, spec);
+    CHECK(!prep);
+    CHECK_EQ(prep.status().code(), my::Errc::InvalidArgument);
+
+    CHECK(!my::image::resize(bad, 5, 5));
+    CHECK(!my::image::save("output/bad.png", bad));
+
+    std::error_code ec;
+    std::filesystem::remove(my::core::to_path("output/bad.png"), ec);
 }

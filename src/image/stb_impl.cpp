@@ -19,6 +19,14 @@
 #define STBI_NO_HDR
 #define STBI_FAILURE_USERMSG
 
+// Windows 上 stb 默认用 fopen(path)，按 ANSI 代码页解释 UTF-8 路径 —— 中文/日文
+// 目录会打不开。stb 2.32 自带 `_wfopen` 版本，打开这两个宏即可：
+//   STBI_WINDOWS_UTF8  -> stbi_load/stbi_load_from_file 等接收 UTF-8 文件名
+//   STBIW_WINDOWS_UTF8 -> stbi_write_png/jpg/... 接收 UTF-8 文件名
+// 非 Windows 平台这两个宏无副作用。
+#define STBI_WINDOWS_UTF8
+#define STBIW_WINDOWS_UTF8
+
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 

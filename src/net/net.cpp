@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -150,17 +151,26 @@ int wait_ready(native_t fd, bool for_write, int timeout_ms) {
     }
 #    endif
     fd_set set;
-    FD_ZERO(&set);
-    FD_SET(fd, &set);
-
-    timeval tv{};
-    timeval* ptv = nullptr;
-    if (timeout_ms >= 0) {
-        tv.tv_sec  = timeout_ms / 1000;
-        tv.tv_usec = (timeout_ms % 1000) * 1000;
-        ptv        = &tv;
-    }
+    const auto start = std::chrono::steady_clock::now();
     for (;;) {
+        // select 出错后集合内容未指定，每次重试都重建
+        FD_ZERO(&set);
+        FD_SET(fd, &set);
+
+        timeval  tv{};
+        timeval* ptv = nullptr;
+        if (timeout_ms >= 0) {
+            int remaining = timeout_ms;
+            if (timeout_ms > 0) {
+                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - start);
+                remaining = timeout_ms - static_cast<int>(elapsed.count());
+                if (remaining <= 0) return 0;  // 被信号打断累计已耗尽预算
+            }
+            tv.tv_sec  = remaining / 1000;
+            tv.tv_usec = (remaining % 1000) * 1000;
+            ptv        = &tv;
+        }
 #if defined(_WIN32)
         const int rc = ::select(0, for_write ? nullptr : &set, for_write ? &set : nullptr, nullptr, ptv);
 #else
@@ -170,11 +180,6 @@ int wait_ready(native_t fd, bool for_write, int timeout_ms) {
         if (rc > 0) return 1;
         if (rc == 0) return 0;
         if (!MYLIB_INTERRUPTED(MYLIB_SOCK_ERRNO())) return -1;
-        // 被信号打断：重试（timeval 可能被改写，按原值重设）
-        if (timeout_ms >= 0) {
-            tv.tv_sec  = timeout_ms / 1000;
-            tv.tv_usec = (timeout_ms % 1000) * 1000;
-        }
     }
 }
 
@@ -348,25 +353,34 @@ Result<Endpoint> parse_endpoint(std::string_view text, std::uint16_t default_por
 // =============================================================================
 TcpSocket::~TcpSocket() { close(); }
 
-TcpSocket::TcpSocket(TcpSocket&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
+TcpSocket::TcpSocket(TcpSocket&& other) noexcept
+    : fd_(other.fd_), desynced_(other.desynced_) {
+    other.fd_       = -1;
+    other.desynced_ = false;
+}
 
 TcpSocket& TcpSocket::operator=(TcpSocket&& other) noexcept {
     if (this != &other) {
         close();
         fd_       = other.fd_;
-        other.fd_ = -1;
+        desynced_ = other.desynced_;
+        other.fd_       = -1;
+        other.desynced_ = false;
     }
     return *this;
 }
 
 void TcpSocket::close() noexcept {
-    if (fd_ >= 0) {
+    if (fd_ != static_cast<std::intptr_t>(kInvalidFd)) {
         close_fd(static_cast<native_t>(fd_));
         fd_ = -1;
     }
+    desynced_ = false;
 }
 
 bool TcpSocket::valid() const noexcept { return fd_ != static_cast<std::intptr_t>(kInvalidFd); }
+
+bool TcpSocket::desynced() const noexcept { return desynced_; }
 
 std::intptr_t TcpSocket::native_handle() const noexcept { return fd_; }
 
@@ -377,7 +391,11 @@ Result<TcpSocket> TcpSocket::connect(const Endpoint& ep, int timeout_ms) {
     auto addrs = resolve(ep, /*passive=*/false, SOCK_STREAM);
     if (!addrs) return addrs.status();
 
-    int last_err = 0;
+    int last_err  = 0;
+    bool timed_out = false;
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 0);
+
     for (const auto& a : addrs.value()) {
         native_t fd = ::socket(a.family, SOCK_STREAM, 0);
         if (fd == kInvalidFd) {
@@ -385,17 +403,34 @@ Result<TcpSocket> TcpSocket::connect(const Endpoint& ep, int timeout_ms) {
             continue;
         }
         no_sigpipe(fd);
-        set_blocking(fd, false);
+        if (!set_blocking(fd, false)) {
+            last_err = MYLIB_SOCK_ERRNO();
+            close_fd(fd);
+            continue;
+        }
         int rc = ::connect(fd, reinterpret_cast<const sockaddr*>(&a.addr), a.len);
         bool ok = (rc == 0);
 
         if (!ok) {
             const int e = MYLIB_SOCK_ERRNO();
             if (MYLIB_IN_PROGRESS(e)) {
-                const int w = wait_ready(fd, /*for_write=*/true, timeout_ms <= 0 ? -1 : timeout_ms);
+                int remain_ms = -1;
+                if (timeout_ms > 0) {
+                    const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        deadline - std::chrono::steady_clock::now());
+                    remain_ms = static_cast<int>(left.count());
+                    if (remain_ms <= 0) {
+                        timed_out = true;
+                        close_fd(fd);
+                        break;
+                    }
+                }
+                const int w = wait_ready(fd, /*for_write=*/true, remain_ms);
                 if (w == 0) {
+                    // 这个地址等超时了：还有预算就试下一个（双栈域名可能 AAAA 黑洞、A 可用）
+                    timed_out = true;
                     close_fd(fd);
-                    return Status(Errc::Timeout, "连接超时: " + ep.to_string());
+                    continue;
                 }
                 if (w > 0) {
                     int       so_err = 0;
@@ -421,12 +456,19 @@ Result<TcpSocket> TcpSocket::connect(const Endpoint& ep, int timeout_ms) {
             continue;
         }
 
-        set_blocking(fd, true);
+        if (!set_blocking(fd, true)) {
+            last_err = MYLIB_SOCK_ERRNO();
+            close_fd(fd);
+            continue;
+        }
         // 注意：这里的 timeout 只用于 connect，不顺手设成收发超时
         // （否则用户拿到 socket 后会在完全没预期的时刻超时）。
         return TcpSocket(static_cast<std::intptr_t>(fd));
     }
 
+    if (timed_out) {
+        return Status(Errc::Timeout, "连接超时: " + ep.to_string());
+    }
     return Status(Errc::IoError, "连接失败: " + ep.to_string() + "（" + errno_text(last_err) + "）");
 }
 
@@ -529,17 +571,29 @@ Result<Bytes> TcpSocket::recv_exact(std::size_t size) {
                                             "（上限 " + std::to_string(kMaxBufferBytes) + "）");
     }
     if (!valid()) return Status(Errc::NotInitialized, "socket 未打开");
+    if (desynced_) {
+        return Status(Errc::RuntimeError,
+                      "socket 流已错位（上一次 recv_exact/分帧消费了部分数据后失败），必须 close 重连");
+    }
     Bytes out(size);
     std::size_t got = 0;
     while (got < size) {
         auto r = recv(out.data() + got, size - got);
         if (!r) {
-            if (r.status().code() == Errc::Timeout) return r.status();
+            // 已经消费了部分字节：流无法安全重试，标记错位；句柄保留给调用方查 peer/关闭。
+            if (got > 0) desynced_ = true;
+            if (r.status().code() == Errc::Timeout) {
+                return Status(Errc::Timeout,
+                              "recv_exact 超时（已收 " + std::to_string(got) + "/" +
+                                  std::to_string(size) + "）: " + r.status().message());
+            }
             return Status(r.status().code(),
                           "recv_exact 失败（已收 " + std::to_string(got) + "/" +
                               std::to_string(size) + "）: " + r.status().message());
         }
         if (r.value() == 0) {
+            // 对端关闭：即使一个字节都没收到，这条连接也不能再用了。
+            desynced_ = true;
             return Status(Errc::IoError,
                           "对端关闭连接（已收 " + std::to_string(got) + "/" +
                               std::to_string(size) + " 字节）");
@@ -583,13 +637,13 @@ TcpListener& TcpListener::operator=(TcpListener&& other) noexcept {
 }
 
 void TcpListener::close() noexcept {
-    if (fd_ >= 0) {
+    if (fd_ != static_cast<std::intptr_t>(kInvalidFd)) {
         close_fd(static_cast<native_t>(fd_));
         fd_ = -1;
     }
 }
 
-bool TcpListener::valid() const noexcept { return fd_ >= 0; }
+bool TcpListener::valid() const noexcept { return fd_ != static_cast<std::intptr_t>(kInvalidFd); }
 
 Result<TcpListener> TcpListener::bind(const Endpoint& ep, int backlog, bool reuse_addr) {
     ensure_wsa();
@@ -638,8 +692,8 @@ Result<TcpSocket> TcpListener::accept(int timeout_ms) {
     }
 
     sockaddr_storage ss{};
-    socklen_t        len = sizeof(ss);
     for (;;) {
+        socklen_t len = sizeof(ss);
         const native_t c = ::accept(fd, reinterpret_cast<sockaddr*>(&ss), &len);
         if (c == kInvalidFd) {
             if (MYLIB_INTERRUPTED(MYLIB_SOCK_ERRNO())) continue;  // 被信号打断，重试
@@ -671,13 +725,13 @@ UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept {
 }
 
 void UdpSocket::close() noexcept {
-    if (fd_ >= 0) {
+    if (fd_ != static_cast<std::intptr_t>(kInvalidFd)) {
         close_fd(static_cast<native_t>(fd_));
         fd_ = -1;
     }
 }
 
-bool UdpSocket::valid() const noexcept { return fd_ >= 0; }
+bool UdpSocket::valid() const noexcept { return fd_ != static_cast<std::intptr_t>(kInvalidFd); }
 
 Result<UdpSocket> UdpSocket::bind(const Endpoint& ep) {
     ensure_wsa();
@@ -798,23 +852,28 @@ Result<std::size_t> UdpSocket::send_to(const Endpoint& ep, const void* data, std
 
     const native_t fd = static_cast<native_t>(fd_);
     for (const auto& a : addrs.value()) {
+        for (;;) {
 #if defined(_WIN32)
-        const int rc = ::sendto(fd, static_cast<const char*>(data),
-                                static_cast<int>(std::min<std::size_t>(
-                                    size, std::numeric_limits<int>::max())),
-                                0, reinterpret_cast<const sockaddr*>(&a.addr), a.len);
-        if (rc == SOCKET_ERROR) return sock_status("sendto");
-        return static_cast<std::size_t>(rc);
+            const int rc = ::sendto(fd, static_cast<const char*>(data),
+                                    static_cast<int>(std::min<std::size_t>(
+                                        size, std::numeric_limits<int>::max())),
+                                    0, reinterpret_cast<const sockaddr*>(&a.addr), a.len);
+            if (rc == SOCKET_ERROR) {
+                if (MYLIB_INTERRUPTED(MYLIB_SOCK_ERRNO())) continue;
+                return sock_status("sendto");
+            }
+            return static_cast<std::size_t>(rc);
 #else
-        const ssize_t rc = ::sendto(fd, data, size, 0, reinterpret_cast<const sockaddr*>(&a.addr),
-                                    a.len);
-        if (rc < 0) {
-            const int e = MYLIB_SOCK_ERRNO();
-            if (MYLIB_INTERRUPTED(e)) continue;
-            return sock_status("sendto");
-        }
-        return static_cast<std::size_t>(rc);
+            const ssize_t rc = ::sendto(fd, data, size, 0,
+                                        reinterpret_cast<const sockaddr*>(&a.addr), a.len);
+            if (rc < 0) {
+                const int e = MYLIB_SOCK_ERRNO();
+                if (MYLIB_INTERRUPTED(e)) continue;
+                return sock_status("sendto");
+            }
+            return static_cast<std::size_t>(rc);
 #endif
+        }
     }
     return Status(Errc::IoError, "sendto 没有可用地址: " + ep.to_string());
 }
@@ -822,6 +881,12 @@ Result<std::size_t> UdpSocket::send_to(const Endpoint& ep, const void* data, std
 Result<Datagram> UdpSocket::recv_from(std::size_t max_size) {
     if (!valid()) return Status(Errc::NotInitialized, "socket 未打开");
     if (max_size == 0) return Status(Errc::InvalidArgument, "max_size 不能为 0");
+    // UDP 数据报本身最多 65535 字节；超过这个值只可能是调用方传错了配置。
+    if (max_size > 65535) {
+        return Status(Errc::OutOfRange,
+                      "recv_from 的 max_size 超过 UDP 数据报上限 65535: " +
+                          std::to_string(max_size));
+    }
 
     Datagram         d;
     sockaddr_storage ss{};
@@ -863,12 +928,20 @@ std::uint16_t UdpSocket::port() const {
 //  分帧
 // =============================================================================
 Status read_line(TcpSocket& sock, std::string& line, std::size_t max_len) {
+    if (sock.desynced()) {
+        return Status(Errc::RuntimeError,
+                      "socket 流已错位（上一次分帧失败），必须 close 重连");
+    }
     line.clear();
     line.reserve(64);
     char c = 0;
     while (true) {
         auto r = sock.recv(&c, 1);
-        if (!r) return r.status();
+        if (!r) {
+            // 已经读了一半的行无法回退；标记错位，避免下一次从行中间开始
+            if (!line.empty()) sock.desynced_ = true;
+            return r.status();
+        }
         if (r.value() == 0) {
             if (line.empty()) return Status(Errc::IoError, "对端关闭连接（未读到行）");
             return Ok();  // 没有换行的最后一行，也算读到
@@ -879,6 +952,8 @@ Status read_line(TcpSocket& sock, std::string& line, std::size_t max_len) {
         }
         line.push_back(c);
         if (line.size() >= max_len) {
+            // 半行已消费且不知道下一行边界，重试会读到错位数据：标记错位，要求重连
+            sock.desynced_ = true;
             return Status(Errc::OutOfRange,
                           "行长度超过上限 " + std::to_string(max_len) + "（对端可能不是行协议）");
         }
@@ -906,6 +981,10 @@ Status write_frame(TcpSocket& sock, const std::string& text) {
 }
 
 Result<Bytes> read_frame(TcpSocket& sock, std::size_t max_size) {
+    if (sock.desynced()) {
+        return Status(Errc::RuntimeError,
+                      "socket 流已错位（上一次分帧失败），必须 close 重连");
+    }
     auto head = sock.recv_exact(4);
     if (!head) return head.status();
 
@@ -914,6 +993,9 @@ Result<Bytes> read_frame(TcpSocket& sock, std::size_t max_size) {
                             (static_cast<std::uint32_t>(head.value()[2]) << 8) |
                             static_cast<std::uint32_t>(head.value()[3]);
     if (n > max_size) {
+        // 长度头已经消费、负载还在流里；直接丢弃 n 字节可能被伪造的 4GB 拖死，
+        // 标记错位，调用方必须 close。
+        sock.desynced_ = true;
         return Status(Errc::OutOfRange,
                       "帧长度 " + std::to_string(n) + " 超过上限 " + std::to_string(max_size));
     }

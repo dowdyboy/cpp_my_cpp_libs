@@ -1,10 +1,14 @@
 #include "my_cpp_libs/http/http.hpp"
 
+#include "my_cpp_libs/core/path_utf8.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <exception>
+#include <filesystem>
 #include <mutex>
 #include <thread>
 
@@ -87,10 +91,45 @@ Status map_error(httplib::Error e, const std::string& what) {
         case httplib::Error::ConnectionTimeout:
         case httplib::Error::Timeout:
         case httplib::Error::Read:
+            // httplib 的 Read 既用于读超时也用于 RST，无法区分；保持既有语义：
+            // 统一归为 Timeout（调用方按"网络失败、可重试"处理）。
             return Status(Errc::Timeout, what + " 超时: " + detail);
         default:
             return Status(Errc::IoError, what + " 失败: " + detail);
     }
+}
+
+/// httplib 的服务端默认开了 SO_REUSEPORT（Linux）/ SO_REUSEADDR（Windows），
+/// 结果是**同一端口可以成功绑定两个 Server**，请求被内核随机分流。
+/// 与 http.hpp "端口被占用在 create 时就能发现"的承诺相反。
+///
+/// 这里显式收紧：
+///   * POSIX：保留 SO_REUSEADDR（TIME_WAIT 后能立即重启），但关掉 SO_REUSEPORT；
+///   * Windows：用 SO_EXCLUSIVEADDRUSE（它和 SO_REUSEADDR 互斥，不能再设 REUSEADDR）。
+void server_socket_options(::socket_t sock) {
+#if defined(_WIN32)
+    int one = 1;
+    ::setsockopt(sock, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+                 reinterpret_cast<const char*>(&one), sizeof(one));
+#else
+    int one = 1;
+    ::setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one), sizeof(one));
+#  if defined(SO_REUSEPORT)
+    int zero = 0;
+    ::setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, reinterpret_cast<const char*>(&zero),
+                 sizeof(zero));
+#  endif
+#endif
+}
+
+/// Windows 的"快速重绑"模式：SO_REUSEADDR。代价是端口冲突检测失效（见头文件）。
+void server_socket_options_reuse(::socket_t sock) {
+#if defined(_WIN32)
+    int one = 1;
+    ::setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one), sizeof(one));
+#else
+    server_socket_options(sock);
+#endif
 }
 
 Response to_response(const httplib::Response& r) {
@@ -349,10 +388,11 @@ Server& Server::operator=(Server&& other) noexcept {
 
 Result<Server> Server::create(const ServerOptions& options) {
     Server s;
-    s.impl_      = std::make_unique<Impl>();
+    s.impl_      = std::make_shared<Impl>();
     s.impl_->opts = options;
 
     auto& svr = s.impl_->svr;
+    svr.set_socket_options(options.reuse_addr ? server_socket_options_reuse : server_socket_options);
     svr.set_read_timeout(options.read_timeout_s, 0);
     svr.set_write_timeout(options.write_timeout_s, 0);
     svr.set_keep_alive_max_count(8);
@@ -479,6 +519,22 @@ void Server::options(const std::string& path, Handler handler) {
 
 Status Server::set_mount_point(const std::string& mount_point, const std::string& dir) {
     if (!impl_) return Status(Errc::NotInitialized, "Server 未创建");
+    if (dir.empty()) return Status(Errc::InvalidArgument, "静态目录为空");
+
+    std::error_code ec;
+    if (!std::filesystem::is_directory(my::core::to_path(dir), ec)) {
+        return Status(Errc::NotFound, "静态目录不存在: " + dir);
+    }
+#if defined(_WIN32)
+    // httplib 的静态文件读取走 ANSI fopen；非 ASCII 目录会 404。这里明确拒绝，
+    // 避免"挂载成功但所有请求 404"这种更难查的失败。
+    for (unsigned char c : dir) {
+        if (c >= 0x80) {
+            return Status(Errc::Unsupported,
+                          "Windows 上 httplib 的静态目录只支持 ASCII 路径: " + dir);
+        }
+    }
+#endif
     if (!impl_->svr.set_mount_point(mount_point, dir)) {
         return Status(Errc::IoError, "挂载静态目录失败: " + dir);
     }
@@ -503,24 +559,35 @@ Status Server::listen_async() {
     bool expected = false;
     if (!impl_->running.compare_exchange_strong(expected, true)) return Ok();
 
+    // 后台线程捕获 shared_ptr：即使 Server 在 detach 之后被析构，Impl 也会活到
+    // 监听线程真正退出（原来捕获裸指针是 UAF）。
+    std::shared_ptr<Impl> impl = impl_;
+
     // 上一次的后台线程如果已经自然结束，先回收，否则对 joinable thread 赋值 = terminate
     {
         // 回收旧线程 + 赋新线程必须在**同一把锁**里：stop() 会在另一个线程读
         // joinable()/get_id()，锁外赋值就是实打实的数据竞争（TSan 能抓到）。
-        std::lock_guard<std::mutex> lock(impl_->thread_mutex);
-        if (impl_->thread.joinable()) impl_->thread.join();  // 该线程已结束，join 立即返回
-        impl_->stopped = false;
-        impl_->thread  = std::thread([impl = impl_.get()] {
-            impl->svr.listen_after_bind();
+        std::lock_guard<std::mutex> lock(impl->thread_mutex);
+        if (impl->thread.joinable()) impl->thread.join();  // 该线程已结束，join 立即返回
+        impl->stopped = false;
+        try {
+            impl->thread = std::thread([impl] {
+                impl->svr.listen_after_bind();
+                impl->running = false;
+            });
+        } catch (const std::exception& e) {
             impl->running = false;
-        });
+            return Status(Errc::RuntimeError, std::string("创建 HTTP 监听线程失败: ") + e.what());
+        }
     }
 
     // 等后台线程真正进入 accept 循环（或立刻失败），避免把"启动失败"报成成功
     for (int i = 0; i < 200; ++i) {
-        if (impl_->svr.is_running()) return Ok();
-        if (!impl_->running.load()) {
-            if (impl_->thread.joinable()) impl_->thread.join();
+        if (impl->svr.is_running()) return Ok();
+        if (!impl->running.load()) {
+            // 失败路径的 join 也必须在锁内，否则会和 stop() 的锁内 join 撞车。
+            std::lock_guard<std::mutex> lock(impl->thread_mutex);
+            if (impl->thread.joinable()) impl->thread.join();
             return Status(Errc::IoError, "HTTP 监听启动失败（端口已被占用或已被 stop）");
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -530,8 +597,10 @@ Status Server::listen_async() {
 
 void Server::stop() {
     if (!impl_) return;
-    impl_->stopped = true;
-    impl_->svr.stop();
+    // 与 listen_async 一样：detach 之后 Impl 由监听线程的 shared_ptr 持有。
+    std::shared_ptr<Impl> impl = impl_;
+    impl->stopped = true;
+    impl->svr.stop();
 
     // 关键判定：handler 上下文（线程池 worker）里绝不能 join 监听线程，
     // 否则就是"worker 等监听线程、监听线程 join 所有 worker"的循环等待（实测死锁）。
@@ -539,27 +608,35 @@ void Server::stop() {
     bool       self_thread  = false;
     {
         // 读 joinable()/get_id() 同样要拿锁：listen_async 可能在另一个线程赋值。
-        std::lock_guard<std::mutex> lock(impl_->thread_mutex);
-        self_thread = impl_->thread.joinable() &&
-                      impl_->thread.get_id() == std::this_thread::get_id();
+        std::lock_guard<std::mutex> lock(impl->thread_mutex);
+        self_thread = impl->thread.joinable() &&
+                      impl->thread.get_id() == std::this_thread::get_id();
     }
     if (from_handler || self_thread) {
         // detach 路径连互斥锁都用 try_lock：如果另一个线程正拿着锁 join 收尾，
         // 我们在这里**阻塞**就会再次形成同样的环（它等监听线程，监听线程等我们）。
         // 拿不到锁就直接返回 —— 那边的 join 会把线程收干净。
-        std::unique_lock<std::mutex> lock(impl_->thread_mutex, std::try_to_lock);
-        if (lock.owns_lock() && impl_->thread.joinable()) {
+        std::unique_lock<std::mutex> lock(impl->thread_mutex, std::try_to_lock);
+        if (lock.owns_lock() && impl->thread.joinable()) {
             // detach 之后 running 由监听线程在退出时自己置 false，
             // 于是外部"等到 running()==false"就等价于"监听线程真的退出了"，
             // 此时才允许析构 Server（detach 路径下唯一的生命周期约定）。
-            impl_->thread.detach();
+            impl->thread.detach();
         }
         return;
     }
 
-    std::lock_guard<std::mutex> lock(impl_->thread_mutex);
-    if (impl_->thread.joinable()) impl_->thread.join();
-    impl_->running = false;
+    bool joined = false;
+    {
+        std::lock_guard<std::mutex> lock(impl->thread_mutex);
+        if (impl->thread.joinable()) {
+            impl->thread.join();
+            joined = true;
+        }
+    }
+    // 只有真的 join 到了才把 running 置 false；detach 路径必须由监听线程自己置，
+    // 否则外部会在监听线程还在收尾时误以为"已经停了"。
+    if (joined) impl->running = false;
 }
 
 std::uint16_t Server::port() const {

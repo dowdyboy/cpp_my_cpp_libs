@@ -61,6 +61,8 @@ if(TARGET mylib_infer)
     list(APPEND _test_sources test_infer.cpp)
     list(APPEND _test_suites infer)
     list(APPEND _test_links mylib_infer)
+    # ORT 模型端口测试要读源码树 models/；ctest 工作目录是 build/
+    list(APPEND _test_defs "MYLIB_TEST_MODELS_DIR=\"${PROJECT_SOURCE_DIR}/models\"")
 endif()
 
 # preprocess 是独立 target（image/http/cv 也会用到），不能挂在 infer 下面：
@@ -89,9 +91,7 @@ if(TARGET mylib_ml)
     list(APPEND _test_sources test_ml.cpp)
     list(APPEND _test_suites ml)
     list(APPEND _test_links mylib_ml)
-    # golden 文件在源码树的 models/ml/ 下；ctest 的工作目录是 build/，所以要给绝对路径
-    # （target 还没创建，攒着，等 add_executable 之后再挂）
-    list(APPEND _test_defs "MYLIB_TEST_MODELS_DIR=\"${PROJECT_SOURCE_DIR}/models\"")
+    # 模型路径宏已由 mylib_infer 分支统一挂上（ml 依赖 infer，正常两者都开）
 endif()
 
 if(TARGET mylib_net)
@@ -161,7 +161,8 @@ endif()
 # 这个构建里如果有**真的**推理后端，ml 用例就不许 skip（skip 意味着 golden 对拍没跑）。
 # --fail-on-skip 的用意是"本该跑却静默跳过"（典型：有 ORT 时 ml 的对拍没跑）。
 # 但它不适用于**环境决定**的跳过：serial 的 9 条 PTY 用例在 Windows 上必然跳过
-# （没装 com0com 之类虚拟串口驱动），那是平台事实而不是回归，所以下面逐用例放行。
+# （没装 com0com 之类虚拟串口驱动）；ncnn 后端在 CI 的 windows-msvc job 里是关的。
+# 这两类按平台事实放行，ORT 的模型端口用例仍然严格。
 if(MYLIB_ENABLE_ML AND MYLIB_INFER_BACKEND STREQUAL "onnxruntime")
     set(_strict_skip TRUE)
 endif()
@@ -169,7 +170,7 @@ endif()
 if(NOT CMAKE_CROSSCOMPILING)
     foreach(_name ${_case_names})
         set(_this_args "")
-        if(_strict_skip AND NOT _name MATCHES "^serial_")
+        if(_strict_skip AND NOT _name MATCHES "^(serial_|infer_ncnn_)")
             list(APPEND _this_args --fail-on-skip)
         endif()
         add_test(NAME mylib_case_${_name} COMMAND mylib_tests --case=${_name}

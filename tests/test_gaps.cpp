@@ -197,22 +197,35 @@ MYTEST_CASE(gap_thread_pool_actually_runs_in_parallel) {
     constexpr int kN = 4;
     CHECK_OK_VALUE(pool, my::thread::ThreadPool::create(kN));
 
-    std::atomic<int> arrived{0};
-    std::atomic<int> finished{0};
+    std::atomic<int>  arrived{0};
+    std::atomic<int>  finished{0};
+    std::atomic<bool> barrier_timeout{false};
 
     std::vector<std::future<void>> futures;
     for (int i = 0; i < kN; ++i) {
         futures.push_back(pool->submit([&] {
             arrived.fetch_add(1);
-            // 等到所有人都到齐（若只有 1 个 worker，这里会一直等到超时）
-            for (int spin = 0; spin < 3000 && arrived.load() < kN; ++spin) my::time::sleep_ms(1);
+            // 真正的栅栏：只有 N 个 worker 同时活着，所有人才可能在 1s 内到齐。
+            // 旧版这里等 3s 且不看结果，1 个 worker 串行跑也能"全绿"。
+            bool all = false;
+            for (int spin = 0; spin < 1000; ++spin) {
+                if (arrived.load() >= kN) {
+                    all = true;
+                    break;
+                }
+                my::time::sleep_ms(1);
+            }
+            if (!all) {
+                barrier_timeout.store(true);
+                return;
+            }
             finished.fetch_add(1);
         }));
     }
     for (auto& f : futures) f.get();
 
     CHECK_EQ(arrived.load(), kN);
-    // 并行的话 4 个都能穿过栅栏；串行的话只有第一个会超时后完成
+    CHECK(!barrier_timeout.load());  // 串行执行时第一批等到超时，这里必须红
     CHECK_EQ(finished.load(), kN);
     (void)pool->wait_idle(std::chrono::milliseconds(2000));
     pool->shutdown();
@@ -323,10 +336,16 @@ MYTEST_CASE(gap_image_unletterbox_boxes_multiple) {
     my::image::unletterbox_boxes(boxes, 2, lb);
     const float sx = lb.scale_x;
     const float sy = lb.scale_y;
-    const float x1 = (80.0f - static_cast<float>(lb.pad_x)) / sx;
-    const float y1 = (60.0f - static_cast<float>(lb.pad_y)) / sy;
-    CHECK_NEAR(boxes[0], x1, 1e-3);
-    CHECK_NEAR(boxes[1], y1, 1e-3);
-    // 两个框都要被映射（第二个框不能因为 stride 算错而留在原值）
-    CHECK(boxes[4] > 400.0f);
+
+    const float src[8] = {80.0f, 60.0f, 240.0f, 180.0f, 400.0f, 300.0f, 600.0f, 450.0f};
+    for (std::size_t i = 0; i < 2; ++i) {
+        const float ex1 = (src[i * 4 + 0] - static_cast<float>(lb.pad_x)) / sx;
+        const float ey1 = (src[i * 4 + 1] - static_cast<float>(lb.pad_y)) / sy;
+        const float ex2 = (src[i * 4 + 2] - static_cast<float>(lb.pad_x)) / sx;
+        const float ey2 = (src[i * 4 + 3] - static_cast<float>(lb.pad_y)) / sy;
+        CHECK_NEAR(boxes[i * 4 + 0], ex1, 1e-3);
+        CHECK_NEAR(boxes[i * 4 + 1], ey1, 1e-3);
+        CHECK_NEAR(boxes[i * 4 + 2], ex2, 1e-3);
+        CHECK_NEAR(boxes[i * 4 + 3], ey2, 1e-3);
+    }
 }

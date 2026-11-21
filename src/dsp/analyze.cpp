@@ -98,13 +98,13 @@ std::vector<Burst> detect_bursts(const Samples& x, std::size_t window, float thr
         }
         const std::size_t begin = i;
         const std::size_t end   = j + window;
-        if (end - begin >= min_len) {
-            Burst b;
-            b.begin   = begin;
-            b.end     = end;
-            b.peak_db = detail::amp_to_db(peak / ref);
-            out.push_back(b);
-        }
+        // min_len 必须在**边界细化之后**按真实样本数比较：这里的 end-begin 包含
+        // 窗口拖尾（约 L + 2*window - 2），用它判长度会让默认 min_len 永远通过。
+        Burst b;
+        b.begin   = begin;
+        b.end     = end;
+        b.peak_db = detail::amp_to_db(peak / ref);
+        out.push_back(b);
         i = j + 1;
     }
 
@@ -136,6 +136,13 @@ std::vector<Burst> detect_bursts(const Samples& x, std::size_t window, float thr
             b.begin = lo;
             b.end   = hi;
         }
+
+        // 细化后的真实长度才是 min_len 的判据
+        out.erase(std::remove_if(out.begin(), out.end(),
+                                 [min_len](const Burst& b) {
+                                     return b.end - b.begin < min_len;
+                                 }),
+                  out.end());
     }
 
     return out;
@@ -263,6 +270,7 @@ Result<Features> analyze(const Samples& x, double sample_rate) {
     const Spectrum& s = spec.value();
 
     Features f;
+    f.sample_rate_hz = sample_rate;
     f.snr_db     = estimate_snr_db(s);
     f.center_freq_hz = 0.0;
     f.bandwidth_hz   = 0.0;
@@ -429,6 +437,14 @@ Classification classify(const Features& f) {
     Classification c;
     c.features = f;
 
+    // 瞬时频率特征在 analyze() 里是 rad/sample；绝对门限换算成 Hz 后再比较。
+    // 手工构造 Features（测试/外部调用）没填 sample_rate 时按 8 kHz 解释，
+    // 兼容 0.1.9 及之前的标定（0.02 rad/sample @ 8k ≈ 25.5 Hz）。
+    const double fs = (f.sample_rate_hz > 0.0) ? f.sample_rate_hz : 8000.0;
+    const double inst_std_hz = f.inst_freq_std * fs / (2.0 * detail::kPi);
+    constexpr double kCwStdHz = 30.0;  // 干净 CW 的瞬时频率抖动上限
+    constexpr double kFmScaleHz = 60.0;
+
     // 判决树（阈值都是在合成信号上标定的，见 tests/test_dsp.cpp）。
     // 顺序有意义：噪声 -> 单音 -> 调幅 -> 调频/FSK -> PSK -> 兜底。
     if (f.snr_db < 6.0 || f.spectral_flatness > 0.55) {
@@ -437,9 +453,9 @@ Classification classify(const Features& f) {
         return c;
     }
 
-    if (f.envelope_cv < 0.15 && f.inst_freq_std < 0.02) {
+    if (f.envelope_cv < 0.15 && inst_std_hz < kCwStdHz) {
         c.modulation = Modulation::CW;
-        c.confidence = margin_confidence(f.inst_freq_std, 0.02, 0.02);
+        c.confidence = margin_confidence(inst_std_hz, kCwStdHz, kCwStdHz);
         return c;
     }
 
@@ -454,21 +470,25 @@ Classification classify(const Features& f) {
         return c;
     }
 
-    if (f.inst_freq_two_level >= 0.60) {
-        c.modulation = Modulation::FSK;
-        c.confidence = margin_confidence(f.inst_freq_two_level, 0.60, 0.30);
-        return c;
-    }
-
+    // PSK 与 FSK 都是恒定包络、瞬时频率呈"两级/跳变"形态，单看 two_level
+    // 会把真实 BPSK 判成 FSK（实测 BPSK: two_level≈0.96、quiet≈0.86；
+    // FSK: two_level≈0.84、quiet≈0.03）。PSK 的关键是**多数时间相位不变**，
+    // 所以 quiet 必须先判。
     if (f.inst_freq_quiet >= 0.50) {
         c.modulation = Modulation::PSK;
         c.confidence = margin_confidence(f.inst_freq_quiet, 0.50, 0.30);
         return c;
     }
 
-    if (f.inst_freq_std >= 0.02) {
+    if (f.inst_freq_two_level >= 0.60) {
+        c.modulation = Modulation::FSK;
+        c.confidence = margin_confidence(f.inst_freq_two_level, 0.60, 0.30);
+        return c;
+    }
+
+    if (inst_std_hz >= kCwStdHz) {
         c.modulation = Modulation::FM;
-        c.confidence = margin_confidence(f.inst_freq_std, 0.02, 0.05);
+        c.confidence = margin_confidence(inst_std_hz, kCwStdHz, kFmScaleHz);
         return c;
     }
 

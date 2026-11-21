@@ -101,7 +101,11 @@ auto d = rx.value().recv_from();                              // {data, from}
 - 失败全部是 `Status`，消息里带 errno/WSA 码；
 - `recv()` 返回 **0 = 对端正常关闭**（POSIX 语义），出错才返回 Status；
 - `send()` 可能部分写，`send_all()` 才保证写完；
-- 单个 socket 不做内部加锁：允许"一读一写"两线程，不要多线程同时 `recv`。
+- 单个 socket 不做内部加锁：允许"一读一写"两线程，不要多线程同时 `recv`；
+- `recv_exact` / `read_frame` / `read_line` 在消费了部分数据后失败时会把
+  `desynced()` 置 true；后续分帧调用返回 `RuntimeError`，只能 `close()` 重连
+  （不会静默从半个帧中间继续读）；
+- UDP 单数据报上限 65535，`recv_from(max_size > 65535)` 直接 `OutOfRange`。
 
 ## 5. `my::http` 用法
 
@@ -176,8 +180,8 @@ srv.value().listen();   // 阻塞；stop() 从别的线程停
 
 | 套件 | 用例数 | 覆盖 |
 |---|---|---|
-| `net` | 22 | 地址解析、TCP 回显、accept/connect 超时、对端关闭、**SIGPIPE 不杀进程**、分帧（含超大长度拒绝）、行协议（CRLF/无换行 EOF）、UDP 往返/超时/广播/组播参数校验、**recv_exact 半途断连**、**端口占用**、**1 MiB 大包**、**move 语义** |
-| `http` | 17 | GET/POST、JSON 往返、query/路径参数、未知方法拒绝、自定义 header、404 与错误体、读超时、连接拒绝、stop 释放端口、非法 base_url、**IPv6 字面量端口解析**、**端口严格校验**、**handler 内 stop（死锁回归）**、**并发请求**、未初始化客户端 |
+| `net` | 30 | 地址解析、TCP 回显、accept/connect 超时、对端关闭、**SIGPIPE 不杀进程**、分帧（含超大长度拒绝）、行协议（CRLF/无换行 EOF）、UDP 往返/超时/广播/组播参数校验、**recv_exact 半途断连**、**端口占用**、**1 MiB 大包**、**move 语义** |
+| `http` | 20 | GET/POST、JSON 往返、query/路径参数、未知方法拒绝、自定义 header、404 与错误体、读超时、连接拒绝、stop 释放端口、非法 base_url、**IPv6 字面量端口解析**、**端口严格校验**、**handler 内 stop（死锁回归）**、**并发请求**、未初始化客户端 |
 
 ```bash
 ctest --preset win-mingw -R "net_|http_" --output-on-failure

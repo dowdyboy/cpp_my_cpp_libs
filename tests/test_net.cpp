@@ -292,6 +292,12 @@ MYTEST_CASE(net_frame_rejects_oversized_length) {
     auto got = my::net::read_frame(p.value().b, 1024);
     CHECK(!got);
     CHECK_EQ(got.status().code(), my::Errc::OutOfRange);
+    // 长度头已消费、负载无法安全丢弃：标记错位，不能重试后错位
+    CHECK(p.value().b.valid());
+    CHECK(p.value().b.desynced());
+    auto retry = my::net::read_frame(p.value().b, 1024);
+    CHECK(!retry);
+    CHECK_EQ(retry.status().code(), my::Errc::RuntimeError);
 }
 
 MYTEST_CASE(net_read_line) {
@@ -325,6 +331,112 @@ MYTEST_CASE(net_read_line_rejects_overlong) {
     auto        st = my::net::read_line(p.value().b, line, /*max_len=*/64);
     CHECK(!st);
     CHECK_EQ(st.code(), my::Errc::OutOfRange);
+    // 半行已经消费：标记错位，后续分帧调用必须拒绝
+    CHECK(p.value().b.desynced());
+    std::string again;
+    auto        retry = my::net::read_line(p.value().b, again, 64);
+    CHECK(!retry);
+    CHECK_EQ(retry.code(), my::Errc::RuntimeError);
+}
+
+MYTEST_CASE(net_recv_timeout) {
+    auto p = SocketPair::make();
+    CHECK_RESULT(p);
+    CHECK_OK(p.value().b.set_timeout(100));
+
+    std::uint8_t byte = 0;
+    const auto   t0   = std::chrono::steady_clock::now();
+    auto         r    = p.value().b.recv(&byte, 1);
+    const auto   ms   = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+    CHECK(!r);
+    CHECK_EQ(r.status().code(), my::Errc::Timeout);
+    CHECK(ms >= 80);
+    // 一个字节都没收到：连接仍可重试，不能被误标记为错位
+    CHECK(p.value().b.valid());
+    CHECK(!p.value().b.desynced());
+}
+
+// set_timeout(0) 恢复阻塞；先收一次超时，再验证后续阻塞 recv 能拿到数据。
+MYTEST_CASE(net_set_timeout_zero_restores_blocking) {
+    auto p = SocketPair::make();
+    CHECK_RESULT(p);
+
+    CHECK_OK(p.value().b.set_timeout(80));
+    std::uint8_t byte = 0;
+    auto         first = p.value().b.recv(&byte, 1);
+    CHECK(!first);
+    CHECK_EQ(first.status().code(), my::Errc::Timeout);
+
+    CHECK_OK(p.value().b.set_timeout(0));
+    std::thread sender([&] {
+        std::this_thread::sleep_for(50ms);
+        (void)p.value().a.send_all("z", 1);
+    });
+
+    auto got = p.value().b.recv(&byte, 1);
+    if (sender.joinable()) sender.join();
+    CHECK_RESULT(got);
+    CHECK_EQ(got.value(), std::size_t{1});
+    CHECK_EQ(byte, static_cast<std::uint8_t>('z'));
+}
+
+MYTEST_CASE(net_read_frame_split_header) {
+    auto p = SocketPair::make();
+    CHECK_RESULT(p);
+
+    const std::string payload = "split-frame";
+    const std::uint32_t n     = static_cast<std::uint32_t>(payload.size());
+    const std::uint8_t  head[4] = {
+        static_cast<std::uint8_t>((n >> 24) & 0xFF), static_cast<std::uint8_t>((n >> 16) & 0xFF),
+        static_cast<std::uint8_t>((n >> 8) & 0xFF), static_cast<std::uint8_t>(n & 0xFF)};
+
+    // 长度头 1 字节 1 字节地发，中间留出调度间隙；接收端必须自己攒满 4 字节
+    for (std::size_t i = 0; i < sizeof(head); ++i) {
+        CHECK_OK(p.value().a.send_all(&head[i], 1));
+        std::this_thread::sleep_for(10ms);
+    }
+    CHECK_OK(p.value().a.send_all(payload.data(), payload.size()));
+
+    auto got = my::net::read_frame(p.value().b, 1024);
+    CHECK_RESULT(got);
+    CHECK_EQ(std::string(got.value().begin(), got.value().end()), payload);
+}
+
+MYTEST_CASE(net_read_frame_partial_payload_timeout_marks_desynced) {
+    auto p = SocketPair::make();
+    CHECK_RESULT(p);
+    CHECK_OK(p.value().b.set_timeout(100));
+
+    const std::uint8_t head[4] = {0, 0, 0, 100};  // 声明 100 字节
+    const std::uint8_t part[3] = {1, 2, 3};
+    CHECK_OK(p.value().a.send_all(head, sizeof(head)));
+    CHECK_OK(p.value().a.send_all(part, sizeof(part)));
+
+    auto got = my::net::read_frame(p.value().b, 1024);
+    CHECK(!got);
+    CHECK_EQ(got.status().code(), my::Errc::Timeout);
+    CHECK(p.value().b.valid());
+    CHECK(p.value().b.desynced());
+}
+
+MYTEST_CASE(net_recv_exact_partial_timeout_marks_desynced) {    auto p = SocketPair::make();
+    CHECK_RESULT(p);
+
+    const std::uint8_t partial[3] = {1, 2, 3};
+    CHECK_OK(p.value().a.send_all(partial, sizeof(partial)));
+    CHECK_OK(p.value().b.set_timeout(50));
+
+    auto got = p.value().b.recv_exact(10);
+    CHECK(!got);
+    CHECK_EQ(got.status().code(), my::Errc::Timeout);
+    // 已收 3/10 后超时：句柄保留但流已错位，重试必须明确拒绝而不是读错位数据
+    CHECK(p.value().b.valid());
+    CHECK(p.value().b.desynced());
+    auto retry = p.value().b.recv_exact(10);
+    CHECK(!retry);
+    CHECK_EQ(retry.status().code(), my::Errc::RuntimeError);
 }
 
 // -----------------------------------------------------------------------------
@@ -365,11 +477,61 @@ MYTEST_CASE(net_udp_recv_timeout) {
     CHECK(ms >= 100);
 }
 
+MYTEST_CASE(net_udp_recv_from_rejects_huge_max_size) {
+    auto s = my::net::UdpSocket::bind({"127.0.0.1", 0});
+    CHECK_RESULT(s);
+
+    // UDP 数据报最多 65535 字节；传 64 KiB 也应当直接拒绝，不能先分配
+    auto d = s.value().recv_from(65536);
+    CHECK(!d);
+    CHECK_EQ(d.status().code(), my::Errc::OutOfRange);
+}
+
 MYTEST_CASE(net_udp_broadcast_flag) {
     auto s = my::net::UdpSocket::open();
     CHECK_RESULT(s);
     CHECK_OK(s.value().set_broadcast(true));
     CHECK_OK(s.value().set_broadcast(false));
+}
+
+// 广播数据面：很多 CI/容器默认禁广播，环境不支持时明确 SKIP，不伪装通过。
+MYTEST_CASE(net_udp_broadcast_roundtrip) {
+    auto rx = my::net::UdpSocket::bind({"0.0.0.0", 0});
+    CHECK_RESULT(rx);
+    CHECK_OK(rx.value().set_timeout(500));
+
+    auto tx = my::net::UdpSocket::open();
+    CHECK_RESULT(tx);
+    CHECK_OK(tx.value().set_broadcast(true));
+
+    const std::string msg = "broadcast-data";
+    auto sent = tx.value().send_to({"255.255.255.255", rx.value().port()}, msg.data(), msg.size());
+    if (!sent) MYTEST_SKIP(("当前环境不允许 UDP 广播: " + sent.status().to_string()).c_str());
+
+    auto d = rx.value().recv_from();
+    if (!d) MYTEST_SKIP(("当前环境收不到 UDP 广播: " + d.status().to_string()).c_str());
+    CHECK_EQ(std::string(d.value().data.begin(), d.value().data.end()), msg);
+}
+
+// 组播数据面：join 失败（无组播路由）时 SKIP；能 join 就必须能收到自己发的包。
+MYTEST_CASE(net_udp_multicast_roundtrip) {
+    auto rx = my::net::UdpSocket::bind({"0.0.0.0", 0});
+    CHECK_RESULT(rx);
+    CHECK_OK(rx.value().set_timeout(500));
+
+    const std::string group = "239.255.42.99";
+    auto joined = rx.value().join_multicast(group);
+    if (!joined) MYTEST_SKIP(("当前环境不支持组播: " + joined.to_string()).c_str());
+
+    auto tx = my::net::UdpSocket::open();
+    CHECK_RESULT(tx);
+    const std::string msg = "multicast-data";
+    auto sent = tx.value().send_to({group, rx.value().port()}, msg.data(), msg.size());
+    if (!sent) MYTEST_SKIP(("当前环境不允许发组播: " + sent.status().to_string()).c_str());
+
+    auto d = rx.value().recv_from();
+    if (!d) MYTEST_SKIP(("当前环境收不到组播: " + d.status().to_string()).c_str());
+    CHECK_EQ(std::string(d.value().data.begin(), d.value().data.end()), msg);
 }
 
 MYTEST_CASE(net_udp_multicast_join_rejects_bad_group) {

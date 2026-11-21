@@ -100,8 +100,25 @@ MYTEST_CASE(thread_pool_shutdown_drains_by_default) {
         }
         pool->shutdown(/*drain=*/true);
         CHECK(pool->stopping());
+        CHECK_EQ(pool->size(), std::size_t{0});  // shutdown 后不能再报"还有 N 个 worker"
     }
     CHECK_EQ(done.load(), 50);  // drain 必须把队列跑完
+}
+
+// 两个线程同时 shutdown：第二个不能提前返回（它必须等第一个 join 完），
+// 且两者都不能把对方/worker 卡死。
+MYTEST_CASE(thread_pool_concurrent_shutdown_waits_for_join) {
+    auto made = my::thread::ThreadPool::create(2);
+    CHECK_RESULT(made);
+    auto pool = std::move(made.value());
+
+    std::thread a([&] { pool->shutdown(); });
+    std::thread b([&] { pool->shutdown(); });
+    a.join();
+    b.join();
+
+    CHECK(pool->stopping());
+    CHECK_EQ(pool->size(), std::size_t{0});
 }
 
 MYTEST_CASE(thread_pool_submit_after_shutdown_breaks_promise) {

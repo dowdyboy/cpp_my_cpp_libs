@@ -159,6 +159,10 @@ public:
                 if (t == nullptr) {
                     return Status(Errc::InvalidArgument, "ncnn: 缺少输入 " + in_names_[i]);
                 }
+                if (!t->valid()) {
+                    return Status(Errc::InvalidArgument,
+                                  "ncnn: 输入 " + in_names_[i] + " 的 data 为空或字节数为 0");
+                }
                 if (t->type != DType::Float32) {
                     return Status(Errc::Unsupported, std::string("ncnn 后端只接受 f32 输入，收到 ") +
                                                          dtype_name(t->type));
@@ -208,7 +212,12 @@ public:
                 // 输出可能是打包布局（elempack=4/8），统一拆回 1
                 if (raw.elempack != 1) {
                     ncnn::Mat plain;
+                    // ncnn 的 convert_packing 返回 void，只能靠结果是否为空判断失败
                     ncnn::convert_packing(raw, plain, 1);
+                    if (plain.empty()) {
+                        return Status(Errc::RuntimeError,
+                                      "ncnn: 输出拆包失败 " + out_names_[i]);
+                    }
                     out_mats_.push_back(std::move(plain));
                 } else {
                     out_mats_.push_back(std::move(raw));

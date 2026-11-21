@@ -8,6 +8,7 @@
 #include "my_cpp_libs/http/http.hpp"
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -16,6 +17,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -436,8 +438,26 @@ MYTEST_CASE(http_stop_from_handler_is_safe) {
     srv->stop();
 }
 
-MYTEST_CASE(http_double_stop_is_safe) {
-    // create 之后连续 stop() 两次
+// create() 的承诺是"端口被占用在这里就能发现"。httplib 默认开 SO_REUSEPORT/
+// SO_REUSEADDR，0.1.9 及之前同一个端口能建出两个 Server（请求随机分流）。
+MYTEST_CASE(http_create_rejects_occupied_port) {
+    my::http::ServerOptions opt;
+    opt.host = "127.0.0.1";
+    opt.port = 0;
+    auto first = my::http::Server::create(opt);
+    CHECK_RESULT(first);
+    const std::uint16_t port = first.value().port();
+    CHECK(port != 0);
+
+    opt.port = port;
+    auto second = my::http::Server::create(opt);
+    CHECK(!second);
+    if (!second) {
+        CHECK_EQ(second.status().code(), my::Errc::IoError);
+    }
+}
+
+MYTEST_CASE(http_double_stop_is_safe) {    // create 之后连续 stop() 两次
     auto ts = TestServer::make();
     CHECK_RESULT(ts);
     ts.value().server.stop();
@@ -555,13 +575,22 @@ MYTEST_CASE(http_put_and_delete_routes) {
     auto ts = TestServer::make();
     CHECK_RESULT(ts);
 
+    std::mutex  stored_mu;
     std::string stored;
-    ts.value().server.put("/item", [&stored](const my::http::Request& req, my::http::Response& res) {
-        stored = req.body;
+    ts.value().server.put("/item", [&stored, &stored_mu](const my::http::Request& req,
+                                                         my::http::Response& res) {
+        {
+            std::lock_guard<std::mutex> lock(stored_mu);
+            stored = req.body;
+        }
         res.set_content("put-ok");
     });
-    ts.value().server.del("/item", [&stored](const my::http::Request&, my::http::Response& res) {
-        stored.clear();
+    ts.value().server.del("/item", [&stored, &stored_mu](const my::http::Request&,
+                                                         my::http::Response& res) {
+        {
+            std::lock_guard<std::mutex> lock(stored_mu);
+            stored.clear();
+        }
         res.set_content("del-ok");
     });
     CHECK_OK(ts.value().server.listen_async());
@@ -573,13 +602,19 @@ MYTEST_CASE(http_put_and_delete_routes) {
     CHECK_RESULT(put);
     CHECK_EQ(put.value().status, 200);
     CHECK_EQ(put.value().body, std::string("put-ok"));
-    CHECK_EQ(stored, std::string("payload-123"));   // 服务端真的收到了 body
+    {
+        std::lock_guard<std::mutex> lock(stored_mu);
+        CHECK_EQ(stored, std::string("payload-123"));   // 服务端真的收到了 body
+    }
 
     auto del = cli.value().del("/item");
     CHECK_RESULT(del);
     CHECK_EQ(del.value().status, 200);
     CHECK_EQ(del.value().body, std::string("del-ok"));
-    CHECK(stored.empty());                          // handler 真的被执行了
+    {
+        std::lock_guard<std::mutex> lock(stored_mu);
+        CHECK(stored.empty());                          // handler 真的被执行了
+    }
 
     ts.value().server.stop();
 }
@@ -622,9 +657,10 @@ MYTEST_CASE(http_payload_over_limit_returns_413) {
     auto srv              = my::http::Server::create(opt);
     CHECK_RESULT(srv);
 
-    bool handler_ran = false;
-    srv.value().post("/big", [&handler_ran](const my::http::Request&, my::http::Response& res) {
-        handler_ran = true;
+    std::atomic<bool> handler_ran{false};
+    srv.value().post("/big", [&handler_ran](const my::http::Request&,
+                                             my::http::Response& res) {
+        handler_ran.store(true);
         res.set_content("should-not-happen");
     });
     CHECK_OK(srv.value().listen_async());
@@ -634,11 +670,140 @@ MYTEST_CASE(http_payload_over_limit_returns_413) {
     CHECK_RESULT(cli);
     auto res = cli.value().post("/big", std::string(4096, 'x'));
 
-    // 客户端要么拿到 413，要么连接被服务端在读之前关掉（都算"拒绝了"）
-    if (res.ok()) {
-        CHECK_EQ(res.value().status, 413);
-    }
-    CHECK(!handler_ran);   // 关键：超限请求绝不能进业务 handler
+    // 超限必须在读 body 之前拒绝，并返回 413（不是"连接被关掉也算过"）
+    CHECK_RESULT(res);
+    CHECK_EQ(res.value().status, 413);
+    CHECK(!handler_ran.load());   // 关键：超限请求绝不能进业务 handler
 
     srv.value().stop();
+}
+
+namespace {
+
+std::string response_header(const my::http::Response& res, std::string_view name) {
+    for (const auto& kv : res.headers) {
+        if (kv.first.size() != name.size()) continue;
+        bool same = true;
+        for (std::size_t i = 0; i < name.size(); ++i) {
+            const char a = static_cast<char>(std::tolower(static_cast<unsigned char>(kv.first[i])));
+            const char b = static_cast<char>(std::tolower(static_cast<unsigned char>(name[i])));
+            if (a != b) {
+                same = false;
+                break;
+            }
+        }
+        if (same) return kv.second;
+    }
+    return {};
+}
+
+}  // namespace
+
+MYTEST_CASE(http_patch_options_and_response_header) {
+    auto ts = TestServer::make();
+    CHECK_RESULT(ts);
+
+    ts.value().server.patch("/item", [](const my::http::Request& req, my::http::Response& res) {
+        res.set_header("X-Test", "patched");
+        res.set_content(req.body);
+    });
+    ts.value().server.options("/item", [](const my::http::Request&, my::http::Response& res) {
+        res.set_header("Allow", "PATCH, OPTIONS");
+        res.status = 204;
+    });
+    CHECK_OK(ts.value().server.listen_async());
+
+    auto cli = my::http::Client::create(client_opts(ts.value().base_url()));
+    CHECK_RESULT(cli);
+
+    auto patch = cli.value().request("PATCH", "/item", "payload", "text/plain");
+    CHECK_RESULT(patch);
+    CHECK_EQ(patch.value().status, 200);
+    CHECK_EQ(patch.value().body, std::string("payload"));
+    CHECK_EQ(response_header(patch.value(), "X-Test"), std::string("patched"));
+
+    auto options = cli.value().request("OPTIONS", "/item");
+    CHECK_RESULT(options);
+    CHECK_EQ(options.value().status, 204);
+    CHECK_EQ(response_header(options.value(), "Allow"), std::string("PATCH, OPTIONS"));
+
+    ts.value().server.stop();
+}
+
+// handler 抛异常必须被库捕获成 500，不能穿透到 httplib worker 把进程带崩。
+MYTEST_CASE(http_handler_exception_returns_500) {
+    auto ts = TestServer::make();
+    CHECK_RESULT(ts);
+
+    ts.value().server.get("/boom", [](const my::http::Request&, my::http::Response&) {
+        throw std::runtime_error("boom");
+    });
+    CHECK_OK(ts.value().server.listen_async());
+
+    auto cli = my::http::Client::create(client_opts(ts.value().base_url()));
+    CHECK_RESULT(cli);
+    auto res = cli.value().get("/boom");
+    CHECK_RESULT(res);
+    CHECK_EQ(res.value().status, 500);
+
+    ts.value().server.stop();
+}
+
+// 阻塞式 listen()：必须真的进入 accept 循环，stop() 后返回。
+MYTEST_CASE(http_listen_blocking_until_stop) {
+    auto ts = TestServer::make();
+    CHECK_RESULT(ts);
+
+    ts.value().server.get("/ping", [](const my::http::Request&, my::http::Response& res) {
+        res.set_content("pong");
+    });
+
+    std::atomic<int> listen_rc{-1};
+    std::thread      listener([&] {
+        const auto st = ts.value().server.listen();
+        listen_rc.store(st.ok() ? 0 : 1);
+    });
+
+    bool up = false;
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (ts.value().server.running()) {
+            up = true;
+            break;
+        }
+        std::this_thread::sleep_for(5ms);
+    }
+    CHECK(up);
+    if (up) {
+        auto cli = my::http::Client::create(client_opts(ts.value().base_url()));
+        CHECK_RESULT(cli);
+        auto res = cli.value().get("/ping");
+        CHECK_RESULT(res);
+        CHECK_EQ(res.value().body, std::string("pong"));
+    }
+
+    ts.value().server.stop();
+    if (listener.joinable()) listener.join();
+    CHECK_EQ(listen_rc.load(), 0);
+    CHECK(!ts.value().server.running());
+}
+
+// stop() 之后端口应能重新绑定（reuse_addr=true 用于避开 TIME_WAIT 的平台差异）。
+MYTEST_CASE(http_stop_allows_rebind) {
+    my::http::ServerOptions opt;
+    opt.host = "127.0.0.1";
+    opt.port = 0;
+    auto first = my::http::Server::create(opt);
+    CHECK_RESULT(first);
+    const std::uint16_t port = first.value().port();
+    CHECK_OK(first.value().listen_async());
+    first.value().stop();
+
+    my::http::ServerOptions again = opt;
+    again.port     = port;
+    again.reuse_addr = true;
+    auto second = my::http::Server::create(again);
+    CHECK_RESULT(second);
+    CHECK_EQ(second.value().port(), port);
+    second.value().stop();
 }

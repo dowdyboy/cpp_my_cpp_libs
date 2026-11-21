@@ -55,14 +55,16 @@ struct Image {
 
 /// 解码图像文件。支持 PNG / JPEG / BMP / TGA / GIF（stb 支持的那几种）。
 ///
-/// @param channels 期望通道数：0 = 保持文件原样（1~4），1/3/4 = 由 stb 转换。
+/// @param channels 期望通道数：0 = 保持文件原样（仅 1/3/4；灰度+alpha 的 2 通道图
+///                 由调用方显式传 1 或 3），1/3/4 = 由 stb 转换。
 ///                 注意 16 bit 图会被降到 8 bit，本组件不处理高位深。
 MYLIB_API Result<Image> load(const std::string& path, int channels = 3);
 
 /// 从内存解码（内嵌资源、无文件系统的板端、网络收到的帧都走这条）。
 MYLIB_API Result<Image> load_memory(const void* data, std::size_t size, int channels = 3);
 
-/// 按扩展名编码：.png / .jpg / .jpeg / .bmp / .tga；其他扩展名按 PNG 写。
+/// 按扩展名编码：.png / .jpg / .jpeg / .bmp / .tga；没有扩展名时按 PNG 写，
+/// 其它扩展名返回 Errc::Unsupported（不会静默改格式）。
 /// JPEG 会用 quality（1~100），其余格式忽略它。
 MYLIB_API Status save(const std::string& path, const Image& image, int quality = 90);
 

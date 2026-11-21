@@ -27,8 +27,12 @@ namespace my::infer {
 namespace {
 
 Ort::Env& ort_env() {
-    static Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "my_cpp_libs");
-    return env;
+    // 故意不析构：Ort::Env 必须比所有 Ort::Session/Ort::Value 活得久。
+    // 如果宿主把 Model/Session 放在命名空间级静态对象里，函数内静态 Env 会在
+    // 这些 Session 之前析构（构造顺序逆序），退出阶段 ReleaseSession 就是 UAF。
+    // 与 log 的 State 一样，泄漏一个 Env 换取进程生命周期内的安全。
+    static Ort::Env* env = new Ort::Env(ORT_LOGGING_LEVEL_WARNING, "my_cpp_libs");
+    return *env;
 }
 
 #if defined(_WIN32)
@@ -144,6 +148,10 @@ public:
                         return Status(Errc::InvalidArgument, "缺少输入: " + port.name);
                     }
                 }
+                if (!tensor->valid()) {
+                    return Status(Errc::InvalidArgument,
+                                  "输入 '" + port.name + "' 的 data 为空或字节数为 0");
+                }
 
                 ONNXTensorElementDataType ort_type{};
                 if (!to_ort(tensor->type, ort_type)) {
@@ -218,9 +226,10 @@ public:
 
 private:
     static OrtMemoryInfo* memory_info() {
-        static Ort::MemoryInfo info =
-            Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-        return info;
+        // 同上：不能让它随静态析构先于 Session 消失
+        static Ort::MemoryInfo* info =
+            new Ort::MemoryInfo(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
+        return *info;
     }
 
     DType read_type(std::size_t index, bool output) const noexcept {

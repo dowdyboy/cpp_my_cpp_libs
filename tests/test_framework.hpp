@@ -318,13 +318,15 @@ inline int run_all() { return run(nullptr, nullptr); }
 #define MYTEST_DETAIL_CAT(a, b) MYTEST_DETAIL_CAT_(a, b)
 
 #define CHECK_RESULT(expr)                                                   \
-    auto&& MYTEST_DETAIL_CAT(_res_, __LINE__) = (expr);                      \
-    if (!MYTEST_DETAIL_CAT(_res_, __LINE__)) {                               \
-        std::printf("         实际错误: %s\n",                               \
-                    MYTEST_DETAIL_CAT(_res_, __LINE__).status().to_string().c_str()); \
-        ::mytest::fail(#expr " 应当返回结果", __FILE__, __LINE__);          \
-        return;                                                              \
-    }
+    do {                                                                     \
+        auto&& _mytest_res = (expr);                                         \
+        if (!_mytest_res) {                                                  \
+            std::printf("         实际错误: %s\n",                           \
+                        _mytest_res.status().to_string().c_str());           \
+            ::mytest::fail(#expr " 应当返回结果", __FILE__, __LINE__);      \
+            return;                                                          \
+        }                                                                    \
+    } while (0)
 
 /// 取 Result<T> 的值并绑到一个名字上；失败时记 FAIL 而不是 abort 掉整个进程。
 ///   CHECK_OK_VALUE(value, doc.get<int>("a.b"));

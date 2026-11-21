@@ -433,6 +433,36 @@ MYTEST_CASE(dsp_stream_agc_converges) {
     CHECK_NEAR(agc.gain(), 1.0, 0.0);
 }
 
+// 一个 NaN/Inf 样本不能把 AGC 功率估计永久污染（旧实现会回退 max_gain，
+// 整路放大 64 倍且永不恢复）。
+MYTEST_CASE(dsp_stream_agc_survives_nonfinite_sample) {
+    const double      fs = 1000.0;
+    const std::size_t n  = 6000;
+    Samples           x  = sine(100.0, fs, n, 0.5);
+
+    my::dsp::Agc::Options opt;
+    opt.target_rms  = 0.2;
+    opt.sample_rate = fs;
+    my::dsp::Agc agc(opt);
+
+    Samples block(x.begin(), x.begin() + 10);
+    agc.process_inplace(block);
+    block.assign(1, std::numeric_limits<float>::quiet_NaN());
+    agc.process_inplace(block);
+    CHECK(std::isfinite(block[0]));
+
+    Samples rest(x.begin() + 11, x.end());
+    agc.process_inplace(rest);
+
+    CHECK(std::isfinite(agc.gain()));
+    CHECK(agc.gain() < 2.0);            // 干净流应约 0.566，绝不能爬到 64
+    CHECK(agc.gain() >= opt.min_gain);
+
+    const double out_rms = rms_from(rest, rest.size() / 2);
+    CHECK(std::isfinite(out_rms));
+    CHECK(out_rms < 1.0);
+}
+
 // -----------------------------------------------------------------------------
 //  8. AGC：极弱信号时增益不超过 max_gain
 // -----------------------------------------------------------------------------

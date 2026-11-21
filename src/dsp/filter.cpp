@@ -128,6 +128,13 @@ Result<Biquad> biquad_design(BiquadType type, double freq_hz, double sample_rate
         return Status(Errc::InvalidArgument, "频率必须在 (0, fs/2) 内");
     }
     if (q <= 0.0) return Status(Errc::InvalidArgument, "q 必须为正");
+    // 极低截止频率：极点会贴到 z=1，float 系数无法保证 1+a1+a2 的符号，
+    // 直接拒绝比输出缓慢发散/NaN 更诚实（普通音频/基带截止远高于这个门限）。
+    if (freq_hz < sample_rate * 1e-4) {
+        return Status(Errc::OutOfRange,
+                      "biquad 频率过低（< fs/10000），float 系数不稳定: " +
+                          std::to_string(freq_hz) + " Hz @ " + std::to_string(sample_rate));
+    }
 
     const double w0    = kTwoPi * freq_hz / sample_rate;
     const double cw    = std::cos(w0);
@@ -166,6 +173,18 @@ Result<Biquad> biquad_design(BiquadType type, double freq_hz, double sample_rate
     bq.b2 = static_cast<float>(b2 / a0);
     bq.a1 = static_cast<float>(a1 / a0);
     bq.a2 = static_cast<float>(a2 / a0);
+
+    // 用**舍入后的 float 系数**复核二阶极点稳定性：
+    //   |a2| < 1, 1+a1+a2 > 0, 1-a1+a2 > 0
+    // 不检查的话，极低截止/极高 Q 会静默输出发散序列。
+    const double a1f = bq.a1;
+    const double a2f = bq.a2;
+    if (!std::isfinite(a1f) || !std::isfinite(a2f) || std::fabs(a2f) >= 1.0 ||
+        !(1.0 + a1f + a2f > 0.0) || !(1.0 - a1f + a2f > 0.0)) {
+        return Status(Errc::OutOfRange,
+                      "biquad 在 float 系数下不稳定（极点接近单位圆）: freq=" +
+                          std::to_string(freq_hz) + " Hz, q=" + std::to_string(q));
+    }
     return bq;
 }
 

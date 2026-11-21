@@ -5,7 +5,7 @@ param(
     [Parameter(Mandatory = $true)][string] $Package,
     [ValidateSet('host', 'cross')][string] $Mode = 'host'
 )
-$ErrorActionPreference = 'Continue'
+$ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot   # this script lives in scripts/
 Set-Location $root
 $env:PATH = "D:\ProgramFiles\msys64\ucrt64\bin;D:\ProgramFiles\ninja-win;$env:PATH"
@@ -39,8 +39,27 @@ $checks = @(
     'include\my_cpp_libs\dsp\stream.hpp',
     'lib\cmake\my_cpp_libs\my_cpp_libsConfig.cmake',
     'share\licenses\my_cpp_libs\my_cpp_libs-LICENSE',
-    'share\licenses\my_cpp_libs\THIRD_PARTY_NOTICES.md'
+    'share\licenses\my_cpp_libs\THIRD_PARTY_NOTICES.md',
+    'share\licenses\my_cpp_libs\spdlog-LICENSE',
+    'share\licenses\my_cpp_libs\nlohmann-json-LICENSE.MIT',
+    'share\licenses\my_cpp_libs\eigen-COPYING.MPL2',
+    'share\licenses\my_cpp_libs\cpp-httplib-LICENSE',
+    'share\licenses\my_cpp_libs\sources\stb_image.h',
+    'share\licenses\my_cpp_libs\sources\pocketfft_hdronly.h'
 )
+if ($name -match 'ort') {
+    # A package named -ort must really contain ORT
+    $checks += 'bin\onnxruntime.dll'
+}
+if (Test-Path (Join-Path $prefix 'bin\onnxruntime.dll')) {
+    # Any package shipping ORT binaries must ship its LICENSE and ThirdPartyNotices
+    $checks += 'share\licenses\my_cpp_libs\onnxruntime-LICENSE'
+    $checks += 'share\licenses\my_cpp_libs\onnxruntime-ThirdPartyNotices.txt'
+}
+if (Get-ChildItem (Join-Path $prefix 'lib') -Filter 'libonnxruntime.so*' -ErrorAction SilentlyContinue) {
+    $checks += 'share\licenses\my_cpp_libs\onnxruntime-LICENSE'
+    $checks += 'share\licenses\my_cpp_libs\onnxruntime-ThirdPartyNotices.txt'
+}
 $bad = 0
 foreach ($c in $checks) {
     if (Test-Path (Join-Path $prefix $c)) { Write-Host "  OK   $c" }
@@ -90,23 +109,72 @@ if ($Mode -eq 'host') {
     $exe = Get-ChildItem $bdir -Recurse -Filter 'sdk_consumer.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($exe) {
         # ORT/OpenCV DLLs live in <prefix>/bin: prepend to PATH before running.
+        # Windows searches System32 before PATH (this machine has an old
+        # onnxruntime.dll there), so copy the exe into the package bin/ and run it
+        # from there: the application directory wins over System32.
         $env:PATH = "$prefix\bin;$env:PATH"
-        $out = & $exe.FullName 2>&1
-        Write-Host "  consumer run exit=$LASTEXITCODE"
+        $runDir = Join-Path $prefix 'bin'
+        New-Item -ItemType Directory -Force $runDir | Out-Null
+        $runExe = Join-Path $runDir ('__verify_' + $exe.Name)
+        Copy-Item $exe.FullName $runExe -Force
+        $out = & $runExe 2>&1
+        $runCode = $LASTEXITCODE
+        Remove-Item $runExe -Force -ErrorAction SilentlyContinue
+        Write-Host "  consumer run exit=$runCode"
         $out | Select-Object -Last 6 | ForEach-Object { Write-Host "   $_" }
+        if ($runCode -ne 0) { Write-Host "  FAIL: sdk_consumer run"; exit 1 }
     } else { Write-Host "  consumer exe missing"; exit 1 }
 
     # Component-level consumer: catches "component does not carry core" and
     $min = Get-ChildItem $bdir -Recurse -Filter 'sdk_consumer_min.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $min) { Write-Host "  consumer_min exe missing"; exit 1 }
-    $out2 = & $min.FullName 2>&1
-    Write-Host "  consumer_min run exit=$LASTEXITCODE"
+    $runMin = Join-Path $prefix ('bin\__verify_' + $min.Name)
+    Copy-Item $min.FullName $runMin -Force
+    $out2 = & $runMin 2>&1
+    $minCode = $LASTEXITCODE
+    Remove-Item $runMin -Force -ErrorAction SilentlyContinue
+    Write-Host "  consumer_min run exit=$minCode"
     $out2 | Select-Object -Last 4 | ForEach-Object { Write-Host "   $_" }
-    if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL: component-level link check"; exit 1 }
+    if ($minCode -ne 0) { Write-Host "  FAIL: component-level link check"; exit 1 }
 } else {
     Write-Host "== cross package: check ELF arch of shipped static libs =="
     $ar = (Get-ChildItem (Join-Path $prefix 'lib') -File -Filter '*.a' -ErrorAction SilentlyContinue | Select-Object -First 1)
-    if ($ar) { Write-Host "  sampled: $($ar.Name) ($([math]::Round($ar.Length/1KB,1)) KB)" }
+    if (-not $ar) { Write-Host "  MISS any lib/*.a"; exit 1 }
+    Write-Host "  sampled: $($ar.Name) ($([math]::Round($ar.Length/1KB,1)) KB)"
+
+    # Read e_machine (offset 18, little-endian) of the first ELF member in the ar archive:
+    #   40 = EM_ARM (armv7), 183 = EM_AARCH64
+    $expected = switch -Regex ($name) {
+        'armv7'   { 40 }
+        'aarch64' { 183 }
+        default   { 0 }
+    }
+    $machine = 0
+    $bytes = [System.IO.File]::ReadAllBytes($ar.FullName)
+    if ($bytes.Length -ge 68) {
+        $magic = [System.Text.Encoding]::ASCII.GetString($bytes, 0, 8)
+        if ($magic -eq "!<arch>`n") {
+            $off = 8
+            while ($off + 60 -le $bytes.Length) {
+                $sizeText = [System.Text.Encoding]::ASCII.GetString($bytes, $off + 48, 10).Trim()
+                $size = 0
+                if (-not [int]::TryParse($sizeText, [ref]$size)) { break }
+                $data = $off + 60
+                if ($data + 20 -le $bytes.Length -and
+                    $bytes[$data] -eq 0x7F -and $bytes[$data + 1] -eq 0x45 -and
+                    $bytes[$data + 2] -eq 0x4C -and $bytes[$data + 3] -eq 0x46) {
+                    $machine = [System.BitConverter]::ToUInt16($bytes, $data + 18)
+                    break
+                }
+                $off = $data + $size + ($size % 2)
+            }
+        }
+    }
+    Write-Host "  ELF machine: $machine (expected: $expected)"
+    if ($expected -ne 0 -and $machine -ne $expected) {
+        Write-Host "  FAIL: package arch does not match its name"
+        exit 1
+    }
 }
 
 Write-Host "== RESULT: $(if ($bad -eq 0) { 'OK' } else { "$bad missing" }) =="

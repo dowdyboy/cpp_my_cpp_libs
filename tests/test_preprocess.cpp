@@ -336,6 +336,17 @@ MYTEST_CASE(preprocess_argmax_topk) {
     CHECK_EQ(topk(scores, 4, 0).size(), std::size_t{0});
 }
 
+// NaN 分数不能破坏 partial_sort 的严格弱序：非有限值排最后，有限值顺序不变。
+MYTEST_CASE(preprocess_topk_handles_nan) {
+    const float scores[]{0.1f, std::numeric_limits<float>::quiet_NaN(), 0.9f, 0.3f};
+    const auto  top3 = topk(scores, 4, 3);
+    CHECK_EQ(top3.size(), std::size_t{3});
+    CHECK_EQ(top3[0].index, std::size_t{2});
+    CHECK_EQ(top3[1].index, std::size_t{3});
+    CHECK_EQ(top3[2].index, std::size_t{0});
+    CHECK(std::isfinite(top3[2].score));
+}
+
 MYTEST_CASE(preprocess_topk_softmax) {
     const float logits[]{2.0f, 1.0f, 0.0f};
     const auto  p = topk_softmax(logits, 3, 2);
@@ -380,6 +391,23 @@ MYTEST_CASE(preprocess_nms_empty) {
     CHECK_EQ(nms({single}, 0.5f).size(), std::size_t{1});
 }
 
+// NaN 分数/坐标不能进入 sort（比较器会失去严格弱序）；坏框直接丢弃。
+MYTEST_CASE(preprocess_nms_drops_nonfinite_boxes) {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    std::vector<Box> boxes{
+        {0, 0, 10, 10, nan, 0},
+        {0, 0, 10, 10, 0.9f, 1},
+        {nan, 0, 10, 10, 0.8f, 1},
+        {20, 20, 30, 30, 0.7f, 1},
+    };
+    const auto keep = nms(boxes, 0.5f);
+    CHECK_EQ(keep.size(), std::size_t{2});
+    for (const auto& b : keep) {
+        CHECK(std::isfinite(b.score));
+        CHECK(std::isfinite(b.x1));
+    }
+}
+
 // -----------------------------------------------------------------------------
 //  数值边界 / 重复框
 // -----------------------------------------------------------------------------
@@ -408,6 +436,9 @@ MYTEST_CASE(preprocess_softmax_extreme_values) {
     const auto         st = softmax(nan_v.data(), nan_v.size());
     CHECK(!st.ok());
     CHECK_EQ(st.code(), my::Errc::RuntimeError);
+    // 失败不能把调用方缓冲改成 NaN：原值必须保持不变
+    CHECK_EQ(nan_v[0], 1.0f);
+    CHECK(std::isnan(nan_v[1]));
 }
 
 // 重复框：IoU=1，第二个必须被抑制；同一位置不同类别则不互相抑制。
@@ -479,5 +510,27 @@ MYTEST_CASE(preprocess_normalize_zero_scale) {
     zero_std.stddev     = {1.0f, 1.0f, 0.0f};
     CHECK_OK(normalize(src6, 3, 2, zero_std, out));  // 第 3 个通道没用到 -> 不校验
     CHECK_EQ(out.size(), std::size_t{6});
+}
+
+// 公开 API 也必须守住缓冲上限：尺寸来自配置/模型，不能让 bad_alloc 穿出 Result。
+MYTEST_CASE(preprocess_rejects_huge_tensor) {
+    std::uint8_t dummy = 0;
+    NormalizeSpec spec;
+    std::vector<float> out;
+
+    auto r = image_to_tensor(&dummy, 100000, 100000, 3, spec, out);
+    CHECK(!r);
+    CHECK_EQ(r.code(), my::Errc::OutOfRange);
+
+    auto h = hwc_to_chw(nullptr, 100000, 100000, 3, out);
+    CHECK(!h);  // null 先被拦；下面用合法指针测尺寸
+    const float one = 0.0f;
+    auto        h2  = hwc_to_chw(&one, 100000, 100000, 3, out);
+    CHECK(!h2);
+    CHECK_EQ(h2.code(), my::Errc::OutOfRange);
+
+    auto n = normalize(&one, static_cast<std::size_t>(100000) * 100000u, 3, spec, out);
+    CHECK(!n);
+    CHECK_EQ(n.code(), my::Errc::OutOfRange);
 }
 

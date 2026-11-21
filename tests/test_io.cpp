@@ -60,9 +60,11 @@ MYTEST_CASE(io_write_read_roundtrip) {
 }
 
 MYTEST_CASE(io_write_replaces_atomically) {
-    const std::string path = case_path("atomic.txt");
-    Cleanup           cleanup{path};
+    const std::string dir = case_path("atomic_dir");
+    Cleanup           cleanup{dir};
+    CHECK_OK(my::io::create_directories(dir));
 
+    const std::string path = my::io::join(dir, "atomic.txt");
     CHECK_OK(my::io::write_file(path, "first version"));
     CHECK_OK(my::io::write_file(path, "second"));
 
@@ -70,15 +72,34 @@ MYTEST_CASE(io_write_replaces_atomically) {
     CHECK_RESULT(read);
     CHECK_EQ(read.value(), std::string("second"));  // 短内容不能残留旧尾巴
 
-    // 原子替换不该留下临时文件：目录里应该只有目标文件
-    const std::string dir = my::io::parent(path).empty() ? std::string(".") : my::io::parent(path);
-    auto              names = my::io::list_dir(dir);
+    // 原子替换不该留下临时文件：这个用例有专属目录，不会扫到别的并行用例
+    auto names = my::io::list_dir(dir);
     CHECK_RESULT(names);
     std::size_t leftovers = 0;
     for (const auto& n : names.value()) {
         if (n.find(".tmp") != std::string::npos) ++leftovers;
     }
     CHECK_EQ(leftovers, std::size_t{0});
+}
+
+// 原子替换失败时：目标（这里是一个目录）不能被删掉，临时文件也不能留下。
+MYTEST_CASE(io_write_failure_cleans_temp_and_keeps_target) {
+    const std::string dir = case_path("atomic_fail_dir");
+    Cleanup           cleanup{dir};
+    CHECK_OK(my::io::create_directories(dir));
+
+    const std::string target = my::io::join(dir, "target_is_a_dir");
+    CHECK_OK(my::io::create_directories(target));
+
+    auto st = my::io::write_file(target, "data");
+    CHECK(!st);
+    CHECK(my::io::is_directory(target));
+
+    auto names = my::io::list_dir(dir);
+    CHECK_RESULT(names);
+    for (const auto& n : names.value()) {
+        CHECK(n.find(".tmp") == std::string::npos);
+    }
 }
 
 MYTEST_CASE(io_read_missing_is_not_found) {

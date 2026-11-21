@@ -12,13 +12,22 @@ namespace {
 using detail::kPi;
 using detail::kTwoPi;
 
-/// 低通（二阶），cutoff <= 0 时用 fs/200 作为"音频/基带"默认
-void lowpass_inplace(Samples& x, double cutoff_hz, double sample_rate) {
+/// 低通（二阶），cutoff <= 0 时用 fs/200 作为"音频/基带"默认。
+/// 设计失败不能静默跳过：返回 Status，由 demod_am/fm 透传给调用方。
+Status lowpass_inplace(Samples& x, double cutoff_hz, double sample_rate) {
+    if (cutoff_hz < 0.0) {
+        return Status(Errc::InvalidArgument,
+                      "解调低通截止频率不能为负: " + std::to_string(cutoff_hz));
+    }
     const double fc = (cutoff_hz > 0.0) ? cutoff_hz : sample_rate / 200.0;
-    if (fc <= 0.0 || fc >= sample_rate / 2.0) return;
+    if (fc <= 0.0 || fc >= sample_rate / 2.0) {
+        return Status(Errc::InvalidArgument,
+                      "解调低通截止频率必须在 (0, fs/2) 内: " + std::to_string(fc));
+    }
     auto bq = biquad_design(BiquadType::Lowpass, fc, sample_rate, 0.70710678);
-    if (!bq) return;
+    if (!bq) return bq.status();
     biquad_apply(bq.value(), x);
+    return Ok();
 }
 
 void remove_mean(Samples& x) {
@@ -142,7 +151,7 @@ Result<Samples> demod_am(const Samples& x, double sample_rate, double audio_cuto
     if (!env) return env.status();
     Samples out = env.value();
     remove_mean(out);
-    lowpass_inplace(out, audio_cutoff_hz, sample_rate);
+    if (auto st = lowpass_inplace(out, audio_cutoff_hz, sample_rate); !st) return st;
     return out;
 }
 
@@ -154,7 +163,7 @@ Result<Samples> demod_fm(const Samples& x, double sample_rate, double audio_cuto
     if (!f) return f.status();
     Samples out = f.value();
     remove_mean(out);
-    lowpass_inplace(out, audio_cutoff_hz, sample_rate);
+    if (auto st = lowpass_inplace(out, audio_cutoff_hz, sample_rate); !st) return st;
     return out;
 }
 

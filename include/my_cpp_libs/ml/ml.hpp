@@ -11,7 +11,9 @@
 //  为什么要有这一层，而不是直接用 my::infer：
 //    1. sklearn 分类器是**双输出**（label int64 + probabilities f32），
 //       infer 的 run_single_f32() 只支持 1 进 1 出；
-//    2. 表格模型的特征**顺序**错了不会报错，只会输出垃圾。特征名和数量必须校验；
+//    2. 表格模型的特征**顺序**错了不会报错，只会输出垃圾；sidecar 记录
+//       n_features/features，predict() 会校验**数量**，特征名用于调用方按
+//       模型顺序对齐（名字本身不做逐项匹配，因为 predict 收的是 vector）；
 //    3. 类别 id → 类别名（"setosa"）的映射要跟着模型走，不能写死在业务里。
 //
 //  不引入任何新的 C++ 三方库：ONNX 走已有的 ORT 后端，元数据走已有的 nlohmann/json。
@@ -83,6 +85,7 @@ public:
                                         bool               verify_hash  = true);
 
     /// 批量推理：features 长度必须是 n_features 的整数倍，样本数 = size / n_features。
+    /// 只校验数量；调用方必须按 `meta().features` 的顺序排特征（名字不做逐项比对）。
     MYLIB_API Result<std::vector<Prediction>> predict(const std::vector<float>& features);
 
     /// 单样本推理（features.size() 必须等于 n_features）

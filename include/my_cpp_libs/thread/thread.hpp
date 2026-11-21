@@ -163,6 +163,7 @@ public:
     /// 而 pending() 要等 packaged_task 兑现 promise 之后才自减，两者之间有一个极小窗口。
     MYLIB_API bool wait_idle(std::chrono::milliseconds timeout);
 
+    /// 当前存活 worker 数；shutdown 之后为 0
     MYLIB_API std::size_t size() const noexcept;
     /// 已提交但未完成的任务数（含正在执行的）。
     /// 注意：它降到 0 的时刻**略晚于**最后一个 future 就绪的时刻（见 wait_idle 的说明），
@@ -177,6 +178,8 @@ private:
     std::vector<std::thread>          workers_;
     std::queue<std::function<void()>> tasks_;
     mutable std::mutex                mutex_;
+    /// 串行化 shutdown 的 join 阶段：并发调用时后来者要等第一个 join 完才能返回
+    std::mutex                        join_mutex_;
     std::condition_variable           work_cv_;
     std::condition_variable           idle_cv_;
     std::atomic<bool>                 stopping_{false};

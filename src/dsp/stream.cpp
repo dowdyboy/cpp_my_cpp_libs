@@ -323,14 +323,25 @@ void Agc::process_inplace(Samples& x) {
     for (auto& sample : x) {
         const double v = static_cast<double>(sample);
 
+        // 非有限样本不能污染功率估计：否则 mean_sq_ 永久 NaN，desired 回退到
+        // max_gain，整路被放大 max_gain 倍且永不恢复。
+        if (!std::isfinite(v)) {
+            sample = 0.0f;
+            mean_sq_ = opt_.target_rms * opt_.target_rms;
+            continue;
+        }
+        if (!std::isfinite(mean_sq_)) mean_sq_ = opt_.target_rms * opt_.target_rms;
+
         // 1) 滑动均方（RMS 的平方），初始为 target_rms^2，避免冷启动时
         //    把"还没估计出功率"误当成极弱信号而先把增益冲到 max。
         mean_sq_ += beta_power_ * (v * v - mean_sq_);
+        if (!std::isfinite(mean_sq_)) mean_sq_ = opt_.target_rms * opt_.target_rms;
         const double rms = std::sqrt(std::max(mean_sq_, 1e-20));
 
         // 2) 目标增益：输出 RMS 要达到 target_rms；夹在 [min_gain, max_gain]。
         double desired = opt_.target_rms / rms;
-        if (!std::isfinite(desired)) desired = opt_.max_gain;
+        // 计算异常时保持当前增益（不要回退到 max_gain）
+        if (!std::isfinite(desired)) desired = gain_;
         desired = std::min(std::max(desired, opt_.min_gain), opt_.max_gain);
 
         // 3) 一阶平滑：增益上升用 attack，下降用 release。
